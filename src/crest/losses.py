@@ -7,8 +7,19 @@ from .model import CRESTAux
 
 
 def lm_loss(logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100) -> torch.Tensor:
-    """Autoregressive token loss: -sum log p(target | prefix, recurrent state)."""
-    return F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=ignore_index)
+    """Autoregressive token loss: -mean log p(target | prefix, recurrent state).
+
+    If a micro-step has no supervised target tokens, the mathematically correct
+    contribution is the empty sum, i.e. zero. PyTorch's mean-reduced
+    cross_entropy returns NaN in that case because it divides by zero valid
+    targets, so handle the empty set explicitly while preserving autograd.
+    """
+    flat_logits = logits.reshape(-1, logits.size(-1))
+    flat_labels = labels.reshape(-1)
+    valid = flat_labels != ignore_index
+    if not torch.any(valid):
+        return flat_logits.sum() * 0.0
+    return F.cross_entropy(flat_logits[valid], flat_labels[valid])
 
 
 def gate_target_loss(aux: CRESTAux, weight: float = 0.0, target: float = 0.5) -> torch.Tensor:

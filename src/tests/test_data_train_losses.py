@@ -24,6 +24,15 @@ def test_lm_loss_runs():
     assert torch.isfinite(loss)
 
 
+def test_lm_loss_empty_supervision_is_zero_not_nan():
+    logits = torch.randn(2, 3, 11, requires_grad=True)
+    labels = torch.full((2, 3), -100)
+    loss = lm_loss(logits, labels)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert loss.item() == 0.0
+
+
 def test_dpo_loss_prefers_higher_policy_ratio():
     good = dpo_loss(torch.tensor([2.0]), torch.tensor([0.0]), torch.tensor([0.0]), torch.tensor([0.0]), beta=1.0)
     bad = dpo_loss(torch.tensor([0.0]), torch.tensor([2.0]), torch.tensor([0.0]), torch.tensor([0.0]), beta=1.0)
