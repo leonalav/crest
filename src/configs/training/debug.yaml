@@ -1,0 +1,13 @@
+model: debug
+batch_size: 8
+max_steps: 1000
+tbptt_k: 8
+learning_rate: 0.0003
+min_learning_rate: 0.00003
+warmup_steps: 100
+weight_decay: 0.1
+grad_clip_norm: 1.0
+gate_regularization_weight: 0.0
+gate_target: 0.5
+precision: fp32
+seed: 1337
