@@ -7,6 +7,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from .attention_policy import AttentionBackendPolicy
 from .config import CRESTConfig
 from .rope import apply_rope, rope_frequencies
 
@@ -61,9 +62,10 @@ class MultiHeadAttention(nn.Module):
     lines 83-93 and 111-118.
     """
 
-    def __init__(self, d_model: int, n_heads: int, dropout: float) -> None:
+    def __init__(self, d_model: int, n_heads: int, dropout: float, backend: str = "auto") -> None:
         super().__init__()
         self.n_heads = n_heads
+        self.backend_policy = AttentionBackendPolicy(backend)
         self.head_dim = d_model // n_heads
         self.q = nn.Linear(d_model, d_model, bias=False)
         self.k = nn.Linear(d_model, d_model, bias=False)
@@ -89,7 +91,8 @@ class MultiHeadAttention(nn.Module):
             lq, lk = q.size(-2), k.size(-2)
             bool_mask = torch.ones(lq, lk, device=q.device, dtype=torch.bool).triu(1)
             mask = torch.zeros(lq, lk, device=q.device, dtype=q.dtype).masked_fill(bool_mask, float("-inf"))
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0, is_causal=False)
+        with self.backend_policy.context():
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0, is_causal=False)
         logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if bool_mask is not None:
             logits = logits.masked_fill(bool_mask, float("-inf"))
@@ -111,6 +114,7 @@ class StateWriter(nn.Module):
         super().__init__()
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.head_dim
+        self.backend_policy = AttentionBackendPolicy(cfg.attention_backend)
         self.q = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.k = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.v = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
@@ -127,7 +131,8 @@ class StateWriter(nn.Module):
         q = self._split(self.q(state))
         k = self._split(self.k(tokens))
         v = self._split(self.v(tokens))
-        update = F.scaled_dot_product_attention(q, k, v)
+        with self.backend_policy.context():
+            update = F.scaled_dot_product_attention(q, k, v)
         logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         probs = torch.softmax(logits, dim=-1)
         update = update.transpose(1, 2).contiguous().view(state.size(0), state.size(1), -1)
@@ -143,8 +148,8 @@ class CRESTLayer(nn.Module):
         self.cfg = cfg
         self.x_norm1 = RMSNorm(cfg.d_model, cfg.rms_norm_eps)
         self.s_norm = RMSNorm(cfg.d_model, cfg.rms_norm_eps)
-        self.local_attn = MultiHeadAttention(cfg.d_model, cfg.n_heads, cfg.dropout)
-        self.state_read = MultiHeadAttention(cfg.d_model, cfg.n_heads, cfg.dropout)
+        self.local_attn = MultiHeadAttention(cfg.d_model, cfg.n_heads, cfg.dropout, cfg.attention_backend)
+        self.state_read = MultiHeadAttention(cfg.d_model, cfg.n_heads, cfg.dropout, cfg.attention_backend)
         self.fuse = nn.Linear(cfg.d_model * 2, cfg.d_model)
         self.x_norm2 = RMSNorm(cfg.d_model, cfg.rms_norm_eps)
         self.ffn = SwiGLU(cfg.d_model, cfg.d_ffn, cfg.dropout)
@@ -153,12 +158,21 @@ class CRESTLayer(nn.Module):
     def forward(self, x: torch.Tensor, state: torch.Tensor, step_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, LayerAux]:
         x_norm = self.x_norm1(x)
         s_norm = self.s_norm(state)
-        local, _ = self.local_attn(x_norm, x_norm, causal=True, rope=True, rope_base=self.cfg.rope_base)
-        read, read_probs = self.state_read(x_norm, s_norm, causal=False, rope=False)
+        local, _ = self.local_attn(x_norm, x_norm, causal=True, rope=self.cfg.use_local_rope, rope_base=self.cfg.rope_base)
+        if self.cfg.use_state_read:
+            read, read_probs = self.state_read(x_norm, s_norm, causal=False, rope=False)
+        else:
+            read = torch.zeros_like(local)
+            read_probs = torch.full((x.size(0), self.cfg.n_heads, x.size(1), state.size(1)), 1.0 / state.size(1), device=x.device, dtype=x.dtype)
         fuse_gate = torch.sigmoid(self.fuse(torch.cat([local, read], dim=-1)))
         x = x + fuse_gate * local + (1.0 - fuse_gate) * read
         x = x + self.ffn(self.x_norm2(x))
-        next_state, gate, write_probs = self.write(s_norm, x, step_idx)
+        if self.cfg.use_state_write:
+            next_state, gate, write_probs = self.write(s_norm, x, step_idx)
+        else:
+            next_state = state
+            gate = torch.ones_like(state)
+            write_probs = torch.full((x.size(0), self.cfg.n_heads, state.size(1), x.size(1)), 1.0 / x.size(1), device=x.device, dtype=x.dtype)
         read_entropy = -(read_probs.clamp_min(1e-9) * read_probs.clamp_min(1e-9).log()).sum(dim=-1).mean()
         write_entropy = -(write_probs.clamp_min(1e-9) * write_probs.clamp_min(1e-9).log()).sum(dim=-1).mean()
         return x, next_state, LayerAux(gate=gate, state_read_entropy=read_entropy, write_entropy=write_entropy)

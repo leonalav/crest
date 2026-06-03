@@ -15,6 +15,8 @@ class CRESTAux:
     gates: list[torch.Tensor]
     state_read_entropy: torch.Tensor
     write_entropy: torch.Tensor
+    hidden: torch.Tensor
+    final_state: list[torch.Tensor]
 
     @property
     def gate_mean(self) -> torch.Tensor:
@@ -60,8 +62,9 @@ class CRESTModel(nn.Module):
             gates.append(aux.gate)
             read_entropies.append(aux.state_read_entropy)
             write_entropies.append(aux.write_entropy)
-        logits = self.lm_head(self.norm(x))
-        return logits, next_state, CRESTAux(gates=gates, state_read_entropy=torch.stack(read_entropies).mean(), write_entropy=torch.stack(write_entropies).mean())
+        hidden = self.norm(x)
+        logits = self.lm_head(hidden)
+        return logits, next_state, CRESTAux(gates=gates, state_read_entropy=torch.stack(read_entropies).mean(), write_entropy=torch.stack(write_entropies).mean(), hidden=hidden, final_state=next_state)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())

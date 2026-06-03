@@ -1,0 +1,15 @@
+suite: natural_episodic_jsonl
+task: jsonl_episodic
+vocab_size: 50304
+num_keys: 0
+num_values: 0
+episode_steps: 64
+step_length: 256
+train_episodes: 0
+eval_episodes: 0
+query_probability: 0.0
+path: data/episodic_jsonl
+seed: 1337
+metadata:
+  schema: '{"steps":[{"input_ids":[int],"labels":[int]}]}'
+  no_cross_episode_packing: true

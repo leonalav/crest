@@ -20,6 +20,10 @@ class CRESTConfig:
     gate_retention_bias: float = -2.0
     tie_embeddings: bool = True
     pad_token_id: int = 0
+    use_state_read: bool = True
+    use_state_write: bool = True
+    use_local_rope: bool = True
+    attention_backend: str = "auto"
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads != 0:
@@ -49,6 +53,16 @@ class TrainingConfig:
     gate_target: float = 0.5
     precision: str = "fp32"
     seed: int = 1337
+    output_dir: str = "runs/debug"
+    run_name: str = "crest_debug"
+    log_every: int = 10
+    eval_every: int = 100
+    save_every: int = 500
+    resume_from: str | None = None
+    num_workers: int = 0
+    use_fsdp: bool = False
+    aux_state_weight: float = 0.0
+    aux_state_dim: int = 128
 
 
 @dataclass(frozen=True)
@@ -63,6 +77,7 @@ class DataConfig:
     train_episodes: int = 1024
     eval_episodes: int = 128
     query_probability: float = 0.5
+    path: str | None = None
     seed: int = 1337
     metadata: dict[str, Any] = field(default_factory=dict)
 
