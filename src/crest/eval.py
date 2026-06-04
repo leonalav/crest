@@ -20,6 +20,10 @@ def evaluate(model: CRESTModel, loader: DataLoader, device: torch.device | str =
     write_entropy_sum = 0.0
     correct = 0
     total = 0
+    boundary_correct = 0
+    boundary_total = 0
+    boundary_loss_sum = 0.0
+    boundary_batches = 0
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
             break
@@ -36,15 +40,26 @@ def evaluate(model: CRESTModel, loader: DataLoader, device: torch.device | str =
             read_entropy_sum += float(aux.state_read_entropy.item())
             write_entropy_sum += float(aux.write_entropy.item())
             valid = labels[:, t] != -100
+            pred = logits.argmax(dim=-1)
             if torch.any(valid):
-                pred = logits.argmax(dim=-1)
                 correct += int((pred[valid] == labels[:, t][valid]).sum().item())
                 total += int(valid.sum().item())
+            if t < input_ids.size(1) - 1:
+                boundary_labels = labels[:, t, -1]
+                boundary_valid = boundary_labels != -100
+                if torch.any(boundary_valid):
+                    boundary_logits = logits[:, -1]
+                    boundary_loss_sum += float(lm_loss(boundary_logits.unsqueeze(1), boundary_labels.unsqueeze(1)).item())
+                    boundary_batches += 1
+                    boundary_correct += int((boundary_logits.argmax(dim=-1)[boundary_valid] == boundary_labels[boundary_valid]).sum().item())
+                    boundary_total += int(boundary_valid.sum().item())
     mean_loss = total_loss / max(1, total_batches)
     return {
         "eval_loss": mean_loss,
         "perplexity": math.exp(min(20.0, mean_loss)),
         "recall_accuracy": correct / max(1, total),
+        "boundary_loss": boundary_loss_sum / max(1, boundary_batches),
+        "boundary_accuracy": boundary_correct / max(1, boundary_total),
         "gate_mean": gate_sum / max(1, total_batches),
         "state_read_entropy": read_entropy_sum / max(1, total_batches),
         "write_entropy": write_entropy_sum / max(1, total_batches),

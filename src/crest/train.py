@@ -139,6 +139,7 @@ def run_training(
     scaler = make_grad_scaler(train_cfg.precision, device)
     step = start_step
     iterator = iter(train_loader)
+    last_eval_metrics: dict[str, float] = {}
     while step < train_cfg.max_steps:
         try:
             batch = next(iterator)
@@ -186,6 +187,7 @@ def run_training(
                 )
         if step > 0 and step % train_cfg.eval_every == 0:
             metrics = evaluate(model, eval_loader, device=device, max_batches=8)
+            last_eval_metrics = metrics
             if logger:
                 logger.log(step, {"event": "eval", **metrics})
             if distributed.is_main:
@@ -205,4 +207,6 @@ def run_training(
         final_path = output_dir / "checkpoint_final.pt"
         save_checkpoint(str(final_path), model, optimizer, step, extra=report)
         print(f"[done] step={step} final_checkpoint={final_path}", flush=True)
-    return {"step": step, **report}
+    if not last_eval_metrics:
+        last_eval_metrics = evaluate(model, eval_loader, device=device, max_batches=8)
+    return {"step": step, "last_eval": last_eval_metrics, **report}

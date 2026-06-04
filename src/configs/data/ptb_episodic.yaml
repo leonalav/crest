@@ -1,0 +1,15 @@
+suite: ptb_episodic
+task: jsonl_episodic
+vocab_size: 260
+num_keys: 0
+num_values: 0
+episode_steps: 16
+step_length: 128
+train_episodes: 0
+eval_episodes: 0
+query_probability: 0.0
+path: data/ptb_episodic
+seed: 1337
+metadata:
+  source_precedent: Penn Treebank used by Pascanu et al. and Transformer-XL
+  tokenizer: byte

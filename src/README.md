@@ -31,6 +31,28 @@ PYTHONPATH=src python -m crest.cli_train \
   --training src/configs/training/debug.yaml
 ```
 
+Prepare raw text into CREST episodes:
+
+```bash
+PYTHONPATH=src python -m crest.cli_prepare_text \
+  --input data/raw/wikitext103 \
+  --out data/wikitext103_episodic \
+  --tokenizer byte \
+  --episode-steps 16 \
+  --step-length 128
+```
+
+Run a reproducible ablation suite:
+
+```bash
+PYTHONPATH=src python -m crest.cli_ablate \
+  --model src/configs/models/debug.yaml \
+  --data src/configs/data/wikitext103_episodic.yaml \
+  --training src/configs/training/debug.yaml \
+  --memory-sweep 4,8,16,32 \
+  --out runs/ablations/wikitext103_debug.jsonl
+```
+
 Run the 125M research harness:
 
 ```bash
