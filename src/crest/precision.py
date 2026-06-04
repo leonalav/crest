@@ -15,4 +15,6 @@ def autocast_context(precision: str, device: torch.device):
 
 def make_grad_scaler(precision: str, device: torch.device):
     enabled = precision == "fp16" and device.type == "cuda"
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=enabled)
     return torch.cuda.amp.GradScaler(enabled=enabled)

@@ -119,7 +119,11 @@ class StateWriter(nn.Module):
         self.k = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.v = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.step_embed = nn.Embedding(cfg.max_steps, cfg.d_model)
-        self.gate = nn.Sequential(nn.Linear(cfg.d_model * 3, cfg.d_model), nn.SiLU(), nn.Linear(cfg.d_model, cfg.d_model))
+        # Learned slot identities break permutation symmetry between zero-initialized
+        # memory slots. They are used for write addressing/gating only, so step-0
+        # state reads from a zero state remain exactly zero as required by tests.
+        self.slot_embed = nn.Embedding(cfg.memory_slots, cfg.d_model)
+        self.gate = nn.Sequential(nn.Linear(cfg.d_model * 4, cfg.d_model), nn.SiLU(), nn.Linear(cfg.d_model, cfg.d_model))
         self.write_norm = RMSNorm(cfg.d_model, cfg.rms_norm_eps)
         nn.init.constant_(self.gate[-1].bias, cfg.gate_retention_bias)
 
@@ -128,7 +132,9 @@ class StateWriter(nn.Module):
         return x.view(b, l, self.n_heads, self.head_dim).transpose(1, 2)
 
     def forward(self, state: torch.Tensor, tokens: torch.Tensor, step_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q = self._split(self.q(state))
+        slot_ids = torch.arange(state.size(1), device=state.device)
+        slot = self.slot_embed(slot_ids).unsqueeze(0).expand_as(state)
+        q = self._split(self.q(state + slot))
         k = self._split(self.k(tokens))
         v = self._split(self.v(tokens))
         with self.backend_policy.context():
@@ -137,7 +143,7 @@ class StateWriter(nn.Module):
         probs = torch.softmax(logits, dim=-1)
         update = update.transpose(1, 2).contiguous().view(state.size(0), state.size(1), -1)
         step = self.step_embed(step_idx.clamp_min(0).clamp_max(self.step_embed.num_embeddings - 1)).unsqueeze(1).expand_as(state)
-        retention = torch.sigmoid(self.gate(torch.cat([state, update, step], dim=-1)))
+        retention = torch.sigmoid(self.gate(torch.cat([state, update, step, slot], dim=-1)))
         next_state = retention * state + (1.0 - retention) * self.write_norm(update)
         return next_state, retention, probs
 

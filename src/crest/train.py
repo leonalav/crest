@@ -128,6 +128,13 @@ def run_training(
     }
     if logger:
         logger.log(start_step, {"event": "startup", **report})
+    if distributed.is_main:
+        print(
+            f"[startup] run={train_cfg.run_name} device={device} precision={train_cfg.precision} "
+            f"params={report['parameters']:,} train_episodes={len(train_ds)} eval_episodes={len(eval_ds)} "
+            f"max_steps={train_cfg.max_steps} output_dir={train_cfg.output_dir}",
+            flush=True,
+        )
 
     scaler = make_grad_scaler(train_cfg.precision, device)
     step = start_step
@@ -159,7 +166,7 @@ def run_training(
                     chunk_loss = loss if chunk_loss is None else chunk_loss + loss
                     last_aux = aux
                 assert chunk_loss is not None
-                total_loss = chunk_loss if total_loss is None else total_loss + chunk_loss.detach()
+                total_loss = chunk_loss.detach() if total_loss is None else total_loss + chunk_loss.detach()
                 scaler.scale(chunk_loss / denom).backward()
                 state = detach_state(state)
         scaler.unscale_(optimizer)
@@ -167,16 +174,35 @@ def run_training(
         scaler.step(optimizer)
         scaler.update()
 
-        if logger and step % train_cfg.log_every == 0:
-            logger.log(step, {"event": "train", "loss": float(total_loss.item()), "lr": lr, "grad_norm": float(grad_norm), "gate_mean": float(last_aux.gate_mean.item()) if last_aux else 0.0})
+        if step % train_cfg.log_every == 0:
+            train_metrics = {"event": "train", "loss": float(total_loss.item() / max(1, t)), "loss_sum": float(total_loss.item()), "lr": lr, "grad_norm": float(grad_norm), "gate_mean": float(last_aux.gate_mean.item()) if last_aux else 0.0}
+            if logger:
+                logger.log(step, train_metrics)
+            if distributed.is_main:
+                print(
+                    f"[train] step={step}/{train_cfg.max_steps} loss={train_metrics['loss']:.4f} "
+                    f"lr={lr:.3e} grad_norm={train_metrics['grad_norm']:.3f} gate_mean={train_metrics['gate_mean']:.3f}",
+                    flush=True,
+                )
         if step > 0 and step % train_cfg.eval_every == 0:
             metrics = evaluate(model, eval_loader, device=device, max_batches=8)
             if logger:
                 logger.log(step, {"event": "eval", **metrics})
+            if distributed.is_main:
+                print(
+                    f"[eval] step={step} loss={metrics['eval_loss']:.4f} ppl={metrics['perplexity']:.3f} "
+                    f"recall={metrics['recall_accuracy']:.3f} gate={metrics['gate_mean']:.3f} "
+                    f"read_H={metrics['state_read_entropy']:.3f} write_H={metrics['write_entropy']:.3f}",
+                    flush=True,
+                )
         if distributed.is_main and step > 0 and step % train_cfg.save_every == 0:
-            save_checkpoint(str(output_dir / f"checkpoint_{step}.pt"), model, optimizer, step, extra=report)
+            ckpt_path = output_dir / f"checkpoint_{step}.pt"
+            save_checkpoint(str(ckpt_path), model, optimizer, step, extra=report)
+            print(f"[checkpoint] step={step} path={ckpt_path}", flush=True)
         step += 1
 
     if distributed.is_main:
-        save_checkpoint(str(output_dir / "checkpoint_final.pt"), model, optimizer, step, extra=report)
+        final_path = output_dir / "checkpoint_final.pt"
+        save_checkpoint(str(final_path), model, optimizer, step, extra=report)
+        print(f"[done] step={step} final_checkpoint={final_path}", flush=True)
     return {"step": step, **report}
