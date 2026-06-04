@@ -39,3 +39,70 @@ def test_jsonl_dataset_and_boundary_metrics(tmp_path):
     metrics = evaluate(model, DataLoader(ds, batch_size=1, collate_fn=collate_episodes), max_batches=1)
     assert "boundary_loss" in metrics
     assert "boundary_accuracy" in metrics
+
+
+def test_wikitext103_downloader_and_mock_training(tmp_path):
+    import sys
+    from unittest.mock import patch
+    from crest.downloader import download_wikitext103
+    from crest.cli_prepare_text import main as prepare_main
+    from crest.train import run_training
+    from crest.config import CRESTConfig, DataConfig, TrainingConfig
+
+    # 1. Test downloader mock mode
+    mock_raw_dir = tmp_path / "raw_wikitext103"
+    download_path = download_wikitext103(dest_dir=mock_raw_dir, mock=True)
+    assert download_path.exists()
+    assert (download_path / "wiki.train.tokens").exists()
+    assert (download_path / "wiki.valid.tokens").exists()
+
+    # 2. Test prep pipeline with mock download via command arguments
+    out_dir = tmp_path / "wikitext103_episodic"
+    
+    test_args = [
+        "cli_prepare_text",
+        "--out", str(out_dir),
+        "--mock-download",
+        "--episode-steps", "4",
+        "--step-length", "16",
+        "--tokenizer", "byte",
+        "--eval-fraction", "0.2"
+    ]
+    with patch.object(sys, "argv", test_args):
+        prepare_main()
+
+    assert (out_dir / "train.jsonl").exists()
+    assert (out_dir / "eval.jsonl").exists()
+    assert (out_dir / "metadata.json").exists()
+
+    with open(out_dir / "metadata.json", "r") as f:
+        meta = json.load(f)
+    assert meta["train"] > 0
+    assert meta["eval"] > 0
+
+    # 3. Verify mock training receives and processes it
+    model_cfg = CRESTConfig(vocab_size=260, max_seq_len=16, max_steps=4, n_layers=1, d_model=32, n_heads=4, d_ffn=64, memory_slots=4)
+    data_cfg = DataConfig(
+        suite="wikitext103_episodic",
+        task="jsonl_episodic",
+        vocab_size=260,
+        episode_steps=4,
+        step_length=16,
+        path=str(out_dir),
+        train_episodes=meta["train"],
+        eval_episodes=meta["eval"]
+    )
+    train_cfg = TrainingConfig(
+        batch_size=2,
+        max_steps=2,
+        tbptt_k=2,
+        output_dir=str(tmp_path / "run_out"),
+        run_name="mock_wt103_run",
+        log_every=1,
+        eval_every=1,
+        save_every=1
+    )
+
+    result = run_training(model_cfg, data_cfg, train_cfg)
+    assert result["step"] == 2
+    assert (tmp_path / "run_out" / "checkpoint_final.pt").exists()

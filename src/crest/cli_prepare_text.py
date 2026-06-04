@@ -4,7 +4,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 
 class ByteTokenizer:
@@ -33,20 +33,38 @@ def load_tokenizer(name: str):
     return tok
 
 
-def iter_texts(input_path: Path) -> Iterable[str]:
+def iter_texts(input_path: Path, text_field: str = "text") -> Iterable[str]:
+    if not input_path.exists():
+        raise FileNotFoundError(f"input path does not exist: {input_path}")
     if input_path.is_file():
         if input_path.suffix == ".jsonl":
             for line in input_path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 if not line.strip():
                     continue
                 row = json.loads(line)
-                yield str(row.get("text", ""))
+                yield str(row.get(text_field, ""))
         else:
             yield input_path.read_text(encoding="utf-8", errors="ignore")
         return
     for path in sorted(input_path.rglob("*")):
-        if path.is_file() and path.suffix.lower() in {".txt", ".text", ".jsonl"}:
-            yield from iter_texts(path)
+        if path.is_file() and path.suffix.lower() in {".txt", ".text", ".jsonl", ".tokens"}:
+            yield from iter_texts(path, text_field=text_field)
+
+
+def iter_hf_texts(dataset_name: str, dataset_config: str | None, split: str, text_field: str, max_documents: int | None) -> Iterator[str]:
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise RuntimeError("HuggingFace dataset loading requires `pip install datasets`.") from exc
+    ds = load_dataset(dataset_name, dataset_config, split=split) if dataset_config else load_dataset(dataset_name, split=split)
+    count = 0
+    for row in ds:
+        text = row.get(text_field)
+        if text:
+            yield str(text)
+            count += 1
+            if max_documents is not None and count >= max_documents:
+                break
 
 
 def encode_text(tokenizer, text: str) -> list[int]:
@@ -104,7 +122,14 @@ def write_split(episodes: list[dict], out_dir: Path, eval_fraction: float, seed:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare raw text into CREST episodic JSONL")
-    parser.add_argument("--input", required=True, help="Raw text file, JSONL with text field, or directory")
+    parser.add_argument("--input", default=None, help="Raw text file, JSONL with text field, or directory")
+    parser.add_argument("--hf-dataset", default=None, help="Optional HuggingFace dataset name, e.g. Salesforce/wikitext")
+    parser.add_argument("--hf-config", default=None, help="Optional HuggingFace dataset config, e.g. wikitext-103-raw-v1")
+    parser.add_argument("--hf-split", default="train", help="HuggingFace split")
+    parser.add_argument("--kaggle-dataset", default=None, help="Optional Kaggle dataset name, e.g. vadimkurochkin/wikitext-103")
+    parser.add_argument("--mock-download", action="store_true", help="Generate mock wikitext files instead of downloading from Kaggle")
+    parser.add_argument("--text-field", default="text", help="Text field for JSONL/HuggingFace rows")
+    parser.add_argument("--max-documents", type=int, default=None, help="Optional document cap for cheap smoke prep")
     parser.add_argument("--out", required=True, help="Output directory containing train.jsonl/eval.jsonl")
     parser.add_argument("--tokenizer", default="byte", help="byte or HuggingFace tokenizer name, e.g. gpt2")
     parser.add_argument("--episode-steps", type=int, default=16)
@@ -113,10 +138,35 @@ def main() -> None:
     parser.add_argument("--eval-fraction", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=1337)
     args = parser.parse_args()
+    if args.input is None and args.hf_dataset is None and args.kaggle_dataset is None:
+        args.kaggle_dataset = "vadimkurochkin/wikitext-103"
     tokenizer = load_tokenizer(args.tokenizer)
-    episodes = build_episodes(iter_texts(Path(args.input)), tokenizer, args.episode_steps, args.step_length, args.stride_tokens)
+    if args.hf_dataset:
+        texts = iter_hf_texts(args.hf_dataset, args.hf_config, args.hf_split, args.text_field, args.max_documents)
+        source = f"hf:{args.hf_dataset}/{args.hf_config or ''}:{args.hf_split}"
+    elif args.kaggle_dataset:
+        if args.mock_download:
+            from crest.downloader import download_wikitext103
+            mock_dir = Path(args.out) / "raw_mock_tokens"
+            input_path = download_wikitext103(dest_dir=mock_dir, mock=True)
+        else:
+            import kagglehub
+            print(f"[prepare_text] downloading {args.kaggle_dataset} via kagglehub...", flush=True)
+            input_path = Path(kagglehub.dataset_download(args.kaggle_dataset))
+        texts = iter_texts(input_path, text_field=args.text_field)
+        source = f"kaggle:{args.kaggle_dataset}"
+    else:
+        input_path = Path(args.input)
+        texts = iter_texts(input_path, text_field=args.text_field)
+        source = str(input_path)
+    episodes = build_episodes(texts, tokenizer, args.episode_steps, args.step_length, args.stride_tokens)
     if not episodes:
-        raise RuntimeError("No episodes produced; check input path and text length.")
+        raise RuntimeError(
+            "No episodes produced. Source had no usable text or documents were too short. "
+            f"source={source!r}, tokenizer={args.tokenizer!r}, episode_steps={args.episode_steps}, step_length={args.step_length}. "
+            "If using WikiText locally, verify files exist with `find data/raw/wikitext103 -type f | head`. "
+            "Or use `--hf-dataset Salesforce/wikitext --hf-config wikitext-103-raw-v1`."
+        )
     write_split(episodes, Path(args.out), args.eval_fraction, args.seed)
     print(f"[prepare_text] wrote {len(episodes)} episodes to {args.out}", flush=True)
 

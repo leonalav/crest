@@ -133,6 +133,12 @@ class JsonlEpisodicDataset(Dataset[Episode]):
         path = Path(cfg.path)
         if path.is_dir():
             path = path / f"{split}.jsonl"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Episodic JSONL dataset file not found at '{path}'. "
+                f"Please download/prepare the dataset first by running: "
+                f"python -m crest.cli_prepare_text --out {cfg.path}"
+            )
         self.rows = path.read_text(encoding="utf-8").splitlines()
         self.cfg = cfg
 
