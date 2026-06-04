@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from .auxiliary import StateReconstructionHead
 from .checkpoint import load_checkpoint, save_checkpoint
@@ -21,6 +22,10 @@ from .metrics import component_parameter_counts, count_parameters, estimate_epis
 from .model import CRESTModel
 from .precision import autocast_context, make_grad_scaler
 from .state import detach_state
+
+
+def unwrap_model(model: torch.nn.Module) -> CRESTModel:
+    return model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
 
 
 def build_optimizer(model: CRESTModel, cfg: TrainingConfig) -> AdamW:
@@ -97,30 +102,38 @@ def run_training(
     parameter/FLOP startup report, and mixed-precision policy. FSDP wrapping is
     handled by the caller so this function also works in unit tests.
     """
-    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     distributed = distributed or DistributedInfo(enabled=False)
+    if device is None and distributed.enabled and torch.cuda.is_available():
+        device = torch.device("cuda", distributed.local_rank)
+    else:
+        device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     torch.manual_seed(train_cfg.seed + distributed.rank)
     output_dir = Path(train_cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model = CRESTModel(model_cfg).to(device)
+    if distributed.enabled:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[distributed.local_rank] if device.type == "cuda" else None)
+    crest_model = unwrap_model(model)
     aux_head = StateReconstructionHead(model_cfg.d_model, train_cfg.aux_state_dim).to(device) if train_cfg.aux_state_weight > 0 else None
     if aux_head is not None:
-        model.aux_state_head = aux_head
+        crest_model.aux_state_head = aux_head
     optimizer = build_optimizer(model, train_cfg)
     start_step = 0
     if train_cfg.resume_from:
-        start_step = load_checkpoint(train_cfg.resume_from, model, optimizer, map_location=device)
+        start_step = load_checkpoint(train_cfg.resume_from, crest_model, optimizer, map_location=device)
 
     train_ds = build_dataset(data_cfg, "train")
     eval_ds = build_dataset(data_cfg, "eval")
-    train_loader = DataLoader(train_ds, batch_size=train_cfg.batch_size, shuffle=True, num_workers=train_cfg.num_workers, collate_fn=collate_episodes, drop_last=True)
-    eval_loader = DataLoader(eval_ds, batch_size=train_cfg.batch_size, shuffle=False, num_workers=train_cfg.num_workers, collate_fn=collate_episodes)
+    train_sampler = DistributedSampler(train_ds, num_replicas=distributed.world_size, rank=distributed.rank, shuffle=True) if distributed.enabled else None
+    eval_sampler = DistributedSampler(eval_ds, num_replicas=distributed.world_size, rank=distributed.rank, shuffle=False) if distributed.enabled else None
+    train_loader = DataLoader(train_ds, batch_size=train_cfg.batch_size, shuffle=train_sampler is None, sampler=train_sampler, num_workers=train_cfg.num_workers, collate_fn=collate_episodes, drop_last=True)
+    eval_loader = DataLoader(eval_ds, batch_size=train_cfg.batch_size, shuffle=False, sampler=eval_sampler, num_workers=train_cfg.num_workers, collate_fn=collate_episodes)
 
     logger = JsonlLogger(train_cfg.output_dir, train_cfg.run_name) if distributed.is_main else None
     report = {
-        "parameters": count_parameters(model),
-        "component_parameters": component_parameter_counts(model),
+        "parameters": count_parameters(crest_model),
+        "component_parameters": component_parameter_counts(crest_model),
         "episode_flops_forward": estimate_episode_flops(model_cfg, data_cfg.episode_steps),
         "model_config": asdict(model_cfg),
         "data_config": asdict(data_cfg),
@@ -141,6 +154,8 @@ def run_training(
     iterator = iter(train_loader)
     last_eval_metrics: dict[str, float] = {}
     while step < train_cfg.max_steps:
+        if train_sampler is not None:
+            train_sampler.set_epoch(step)
         try:
             batch = next(iterator)
         except StopIteration:
@@ -152,7 +167,7 @@ def run_training(
         model.train()
         optimizer.zero_grad(set_to_none=True)
         b, t, _ = batch.input_ids.shape
-        state = model.init_state(b, device=device, dtype=next(model.parameters()).dtype)
+        state = crest_model.init_state(b, device=device, dtype=next(model.parameters()).dtype)
         total_loss = None
         last_aux = None
         with autocast_context(train_cfg.precision, device):
@@ -186,7 +201,7 @@ def run_training(
                     flush=True,
                 )
         if step > 0 and step % train_cfg.eval_every == 0:
-            metrics = evaluate(model, eval_loader, device=device, max_batches=8)
+            metrics = evaluate(crest_model, eval_loader, device=device, max_batches=8)
             last_eval_metrics = metrics
             if logger:
                 logger.log(step, {"event": "eval", **metrics})
@@ -199,14 +214,14 @@ def run_training(
                 )
         if distributed.is_main and step > 0 and step % train_cfg.save_every == 0:
             ckpt_path = output_dir / f"checkpoint_{step}.pt"
-            save_checkpoint(str(ckpt_path), model, optimizer, step, extra=report)
+            save_checkpoint(str(ckpt_path), crest_model, optimizer, step, extra=report)
             print(f"[checkpoint] step={step} path={ckpt_path}", flush=True)
         step += 1
 
     if distributed.is_main:
         final_path = output_dir / "checkpoint_final.pt"
-        save_checkpoint(str(final_path), model, optimizer, step, extra=report)
+        save_checkpoint(str(final_path), crest_model, optimizer, step, extra=report)
         print(f"[done] step={step} final_checkpoint={final_path}", flush=True)
     if not last_eval_metrics:
-        last_eval_metrics = evaluate(model, eval_loader, device=device, max_batches=8)
+        last_eval_metrics = evaluate(crest_model, eval_loader, device=device, max_batches=8)
     return {"step": step, "last_eval": last_eval_metrics, **report}
