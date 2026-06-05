@@ -1,0 +1,12 @@
+suite: synthetic_exact_two_hop_debug
+task: exact_two_hop
+vocab_size: 1024
+num_keys: 16
+num_values: 64
+episode_steps: 16
+step_length: 16
+train_episodes: 4096
+eval_episodes: 512
+query_probability: 0.5
+path: null
+seed: 4242

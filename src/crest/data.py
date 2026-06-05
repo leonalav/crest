@@ -99,6 +99,40 @@ class SyntheticMultiHopDataset(SyntheticKeyValueDataset):
         return Episode(torch.tensor(steps), torch.tensor(labels), torch.arange(self.cfg.episode_steps))
 
 
+class SyntheticExactTwoHopDataset(SyntheticKeyValueDataset):
+    """Synthetic curriculum where every query has an exact two-hop answer."""
+
+    LINK = 4
+
+    def __getitem__(self, index: int) -> Episode:
+        rng = random.Random(self.cfg.seed + index)
+        chains: list[tuple[int, int, int]] = []
+        edges: dict[int, int] = {}
+        steps: list[list[int]] = []
+        labels: list[list[int]] = []
+        for _ in range(self.cfg.episode_steps):
+            do_query = bool(chains) and rng.random() < self.cfg.query_probability
+            if do_query:
+                a, _, c = rng.choice(chains)
+                toks = [self.QUERY, self.key_offset + a, self.LINK, self.ANSWER]
+                labs = [-100, -100, -100, self.value_offset + c % self.cfg.num_values]
+            else:
+                a = rng.randrange(self.cfg.num_keys)
+                b = rng.randrange(self.cfg.num_keys)
+                c = rng.randrange(self.cfg.num_keys)
+                edges[a] = b
+                edges[b] = c
+                chains.append((a, b, c))
+                if rng.random() < 0.5:
+                    toks = [self.WRITE, self.key_offset + a, self.LINK, self.key_offset + b]
+                else:
+                    toks = [self.WRITE, self.key_offset + b, self.LINK, self.key_offset + c]
+                labs = [-100, -100, -100, -100]
+            steps.append(toks[: self.cfg.step_length] + [self.PAD] * max(0, self.cfg.step_length - len(toks)))
+            labels.append(labs[: self.cfg.step_length] + [-100] * max(0, self.cfg.step_length - len(labs)))
+        return Episode(torch.tensor(steps), torch.tensor(labels), torch.arange(self.cfg.episode_steps))
+
+
 class SyntheticToolTraceDataset(SyntheticKeyValueDataset):
     """Synthetic tool-call/return traces for agentic step-boundary training."""
 
@@ -170,6 +204,8 @@ def build_dataset(cfg: DataConfig, split: str = "train") -> Dataset[Episode]:
         return SyntheticKeyValueDataset(cfg, split)
     if cfg.task == "multi_hop":
         return SyntheticMultiHopDataset(cfg, split)
+    if cfg.task == "exact_two_hop":
+        return SyntheticExactTwoHopDataset(cfg, split)
     if cfg.task == "tool_trace":
         return SyntheticToolTraceDataset(cfg, split)
     if cfg.task == "jsonl_episodic":

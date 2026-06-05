@@ -1,0 +1,17 @@
+model: debug_plus
+batch_size: 256
+max_steps: 600
+tbptt_k: 8
+learning_rate: 0.00025
+min_learning_rate: 0.000025
+warmup_steps: 100
+weight_decay: 0.1
+grad_clip_norm: 1.0
+gate_regularization_weight: 0.0
+gate_target: 0.5
+precision: fp16
+seed: 1337
+num_workers: 2
+log_every: 50
+eval_every: 100
+save_every: 600

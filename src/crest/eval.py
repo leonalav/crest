@@ -24,6 +24,12 @@ def evaluate(model: CRESTModel, loader: DataLoader, device: torch.device | str =
     boundary_total = 0
     boundary_loss_sum = 0.0
     boundary_batches = 0
+    early_correct = 0
+    early_total = 0
+    mid_correct = 0
+    mid_total = 0
+    late_correct = 0
+    late_total = 0
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
             break
@@ -42,8 +48,19 @@ def evaluate(model: CRESTModel, loader: DataLoader, device: torch.device | str =
             valid = labels[:, t] != -100
             pred = logits.argmax(dim=-1)
             if torch.any(valid):
-                correct += int((pred[valid] == labels[:, t][valid]).sum().item())
+                hits = pred[valid] == labels[:, t][valid]
+                correct += int(hits.sum().item())
                 total += int(valid.sum().item())
+                progress = t / max(1, input_ids.size(1) - 1)
+                if progress < 1 / 3:
+                    early_correct += int(hits.sum().item())
+                    early_total += int(valid.sum().item())
+                elif progress < 2 / 3:
+                    mid_correct += int(hits.sum().item())
+                    mid_total += int(valid.sum().item())
+                else:
+                    late_correct += int(hits.sum().item())
+                    late_total += int(valid.sum().item())
             if t < input_ids.size(1) - 1:
                 boundary_labels = labels[:, t, -1]
                 boundary_valid = boundary_labels != -100
@@ -60,6 +77,9 @@ def evaluate(model: CRESTModel, loader: DataLoader, device: torch.device | str =
         "recall_accuracy": correct / max(1, total),
         "boundary_loss": boundary_loss_sum / max(1, boundary_batches),
         "boundary_accuracy": boundary_correct / max(1, boundary_total),
+        "early_recall_accuracy": early_correct / max(1, early_total),
+        "mid_recall_accuracy": mid_correct / max(1, mid_total),
+        "late_recall_accuracy": late_correct / max(1, late_total),
         "gate_mean": gate_sum / max(1, total_batches),
         "state_read_entropy": read_entropy_sum / max(1, total_batches),
         "write_entropy": write_entropy_sum / max(1, total_batches),

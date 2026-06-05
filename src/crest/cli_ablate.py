@@ -13,6 +13,7 @@ from .ablation import memory_sweep_configs, no_state_config
 from .baselines import FullAttentionBaseline
 from .config import CRESTConfig, DataConfig, TrainingConfig
 from .data import build_dataset, collate_episodes
+from .distributed import init_distributed
 from .eval import evaluate
 from .losses import lm_loss
 from .train import build_optimizer, cosine_warmup_lr, run_training, set_lr
@@ -78,27 +79,39 @@ def main() -> None:
     parser.add_argument("--training", required=True)
     parser.add_argument("--memory-sweep", default="4,8,16,32")
     parser.add_argument("--out", default="runs/ablations/results.jsonl")
+    parser.add_argument("--skip-full-attention", action="store_true", help="Skip the slow dense full-attention baseline")
+    parser.add_argument("--full-attention-steps", type=int, default=None, help="Override dense baseline training steps")
     args = parser.parse_args()
 
     model_cfg = load_dataclass(CRESTConfig, args.model)
     data_cfg = load_dataclass(DataConfig, args.data)
     train_cfg = load_dataclass(TrainingConfig, args.training)
+    dist = init_distributed()
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if dist.is_main:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
     variants: list[tuple[str, CRESTConfig]] = [("crest", model_cfg), ("no_state", no_state_config(model_cfg))]
     for name, cfg in memory_sweep_configs(model_cfg, [int(x) for x in args.memory_sweep.split(",") if x]).items():
         variants.append((name, cfg))
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for name, cfg in variants:
-            tcfg = replace(train_cfg, output_dir=str(Path(train_cfg.output_dir) / name), run_name=f"{train_cfg.run_name}_{name}")
-            result = run_training(cfg, data_cfg, tcfg)
+    rows = []
+    for name, cfg in variants:
+        tcfg = replace(train_cfg, output_dir=str(Path(train_cfg.output_dir) / name), run_name=f"{train_cfg.run_name}_{name}")
+        result = run_training(cfg, data_cfg, tcfg, distributed=dist)
+        if dist.is_main:
             row = {"variant": name, "model_type": "crest", "memory_slots": cfg.memory_slots, "parameters": result["parameters"], **result.get("last_eval", {})}
-            f.write(json.dumps(row) + "\n")
-        baseline = run_full_attention_baseline(model_cfg, data_cfg, replace(train_cfg, max_steps=min(train_cfg.max_steps, 200)))
-        f.write(json.dumps(baseline) + "\n")
-    print(f"[ablate] wrote results to {out_path}", flush=True)
+            rows.append(row)
+
+    if dist.is_main:
+        with out_path.open("w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row) + "\n")
+            if not args.skip_full_attention:
+                baseline_steps = train_cfg.max_steps if args.full_attention_steps is None else args.full_attention_steps
+                baseline = run_full_attention_baseline(model_cfg, data_cfg, replace(train_cfg, max_steps=baseline_steps))
+                f.write(json.dumps(baseline) + "\n")
+        print(f"[ablate] wrote results to {out_path}", flush=True)
 
 
 if __name__ == "__main__":
