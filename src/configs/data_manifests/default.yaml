@@ -13,4 +13,4 @@ datasets:
     split: train
     text_field: code
     streaming: true
-    max_tokens: 1000000000
+    max_tokens: 5000000
