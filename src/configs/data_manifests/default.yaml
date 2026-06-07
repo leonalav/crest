@@ -3,7 +3,7 @@ datasets:
     subset: sample-10BT
     split: train
     text_field: text
-    max_documents: 50000
+    max_documents: 500000000
     streaming: false
   - repo: tokyotech-llm/swallow-math
     split: train
@@ -13,4 +13,16 @@ datasets:
     split: train
     text_field: code
     streaming: true
-    max_tokens: 5000000
+    max_tokens: 1000000000
+format: arrow
+task: arrow_episodic
+path: data/episodic_arrow/default
+episode_steps: 16
+step_length: 128
+train_episodes: 0
+eval_episodes: 0
+vocab_size: 128256
+metadata:
+  tokenizer: meta-llama/Meta-Llama-3-8B
+  pad_token_id: 128001
+  eos_token_id: 128001

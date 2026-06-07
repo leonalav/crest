@@ -199,6 +199,42 @@ class JsonlEpisodicDataset(Dataset[Episode]):
         return Episode(torch.tensor(input_steps), torch.tensor(label_steps), torch.arange(self.cfg.episode_steps))
 
 
+class ArrowEpisodicDataset(Dataset[Episode]):
+    def __init__(self, cfg: DataConfig, split: str = "train") -> None:
+        if cfg.path is None:
+            raise ValueError("ArrowEpisodicDataset requires DataConfig.path")
+        try:
+            from datasets import load_from_disk
+        except ImportError as exc:
+            raise RuntimeError("Arrow episodic datasets require `pip install datasets`.") from exc
+        path = Path(cfg.path)
+        if path.is_dir() and (path / split).exists():
+            path = path / split
+        if not path.exists():
+            raise FileNotFoundError(f"Episodic Arrow dataset not found at '{path}'. Run: python -m crest.cli_prepare_text --out {cfg.path}")
+        self.ds = load_from_disk(str(path))
+        self.cfg = cfg
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, index: int) -> Episode:
+        row = self.ds[int(index)]
+        steps = row["steps"][: self.cfg.episode_steps]
+        input_steps, label_steps = [], []
+        for step in steps:
+            ids = list(step["input_ids"][: self.cfg.step_length])
+            labels = list(step["labels"][: self.cfg.step_length]) if "labels" in step else ids[1:] + [-100]
+            ids += [0] * max(0, self.cfg.step_length - len(ids))
+            labels += [-100] * max(0, self.cfg.step_length - len(labels))
+            input_steps.append(ids)
+            label_steps.append(labels)
+        while len(input_steps) < self.cfg.episode_steps:
+            input_steps.append([0] * self.cfg.step_length)
+            label_steps.append([-100] * self.cfg.step_length)
+        return Episode(torch.tensor(input_steps), torch.tensor(label_steps), torch.arange(self.cfg.episode_steps))
+
+
 def build_dataset(cfg: DataConfig, split: str = "train") -> Dataset[Episode]:
     if cfg.task in {"key_value_recall", "overwrite_recall"}:
         return SyntheticKeyValueDataset(cfg, split)
@@ -210,4 +246,6 @@ def build_dataset(cfg: DataConfig, split: str = "train") -> Dataset[Episode]:
         return SyntheticToolTraceDataset(cfg, split)
     if cfg.task == "jsonl_episodic":
         return JsonlEpisodicDataset(cfg, split)
+    if cfg.task == "arrow_episodic":
+        return ArrowEpisodicDataset(cfg, split)
     raise ValueError(f"unknown data task {cfg.task!r}")

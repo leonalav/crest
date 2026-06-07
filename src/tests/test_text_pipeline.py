@@ -5,20 +5,20 @@ from torch.utils.data import DataLoader
 
 from crest.cli_prepare_text import ByteTokenizer, build_episodes, write_split
 from crest.config import CRESTConfig, DataConfig
-from crest.data import JsonlEpisodicDataset, collate_episodes
+from crest.data import ArrowEpisodicDataset, JsonlEpisodicDataset, collate_episodes
 from crest.eval import evaluate
 from crest.model import CRESTModel
 
 
-def test_prepare_text_builds_shifted_episodic_jsonl(tmp_path):
+def test_prepare_text_builds_shifted_episodic_arrow(tmp_path):
     tok = ByteTokenizer()
     episodes = build_episodes(["hello world"], tok, episode_steps=2, step_length=4, stride_tokens=0)
     assert episodes
     first = episodes[0]["steps"][0]
     assert first["labels"][:-1] == first["input_ids"][1:]
     write_split(episodes, tmp_path, eval_fraction=0.5, seed=1)
-    assert (tmp_path / "train.jsonl").exists()
-    assert (tmp_path / "eval.jsonl").exists()
+    assert (tmp_path / "train").exists()
+    assert (tmp_path / "eval").exists()
     assert json.loads((tmp_path / "metadata.json").read_text())["episodes"] == len(episodes)
 
 
@@ -71,8 +71,8 @@ def test_wikitext103_downloader_and_mock_training(tmp_path):
     with patch.object(sys, "argv", test_args):
         prepare_main()
 
-    assert (out_dir / "train.jsonl").exists()
-    assert (out_dir / "eval.jsonl").exists()
+    assert (out_dir / "train").exists()
+    assert (out_dir / "eval").exists()
     assert (out_dir / "metadata.json").exists()
 
     with open(out_dir / "metadata.json", "r") as f:
@@ -84,7 +84,7 @@ def test_wikitext103_downloader_and_mock_training(tmp_path):
     model_cfg = CRESTConfig(vocab_size=260, max_seq_len=16, max_steps=4, n_layers=1, d_model=32, n_heads=4, d_ffn=64, memory_slots=4)
     data_cfg = DataConfig(
         suite="wikitext103_episodic",
-        task="jsonl_episodic",
+        task="arrow_episodic",
         vocab_size=260,
         episode_steps=4,
         step_length=16,
@@ -92,6 +92,7 @@ def test_wikitext103_downloader_and_mock_training(tmp_path):
         train_episodes=meta["train"],
         eval_episodes=meta["eval"]
     )
+    assert ArrowEpisodicDataset(data_cfg, "train")[0].input_ids.shape == (4, 16)
     train_cfg = TrainingConfig(
         batch_size=2,
         max_steps=2,

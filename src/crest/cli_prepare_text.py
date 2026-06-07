@@ -73,20 +73,21 @@ def encode_text(tokenizer, text: str) -> list[int]:
     return list(tokenizer.encode(text, add_special_tokens=True))
 
 
-def tokens_to_episode(tokens: list[int], episode_steps: int, step_length: int) -> dict | None:
+def tokens_to_episode(tokens: list[int], episode_steps: int, step_length: int, pad_token_id: int = 0) -> dict | None:
     needed_inputs = episode_steps * step_length
     if len(tokens) < 2:
         return None
     tokens = tokens[: needed_inputs + 1]
     if len(tokens) < needed_inputs + 1:
-        tokens = tokens + [0] * (needed_inputs + 1 - len(tokens))
+        tokens = tokens + [pad_token_id] * (needed_inputs + 1 - len(tokens))
     inputs = tokens[:-1]
     labels = tokens[1:]
     steps = []
     for s in range(episode_steps):
         start = s * step_length
         end = start + step_length
-        steps.append({"input_ids": inputs[start:end], "labels": labels[start:end]})
+        label_chunk = [-100 if tok == pad_token_id else tok for tok in labels[start:end]]
+        steps.append({"input_ids": inputs[start:end], "labels": label_chunk})
     return {"steps": steps}
 
 
@@ -98,12 +99,23 @@ def build_episodes(texts: Iterable[str], tokenizer, episode_steps: int, step_len
         ids = encode_text(tokenizer, text)
         for start in range(0, max(1, len(ids) - 1), stride):
             chunk = ids[start : start + window]
-            ep = tokens_to_episode(chunk, episode_steps, step_length)
+            ep = tokens_to_episode(chunk, episode_steps, step_length, getattr(tokenizer, "pad_token_id", 0) or 0)
             if ep is not None:
                 episodes.append(ep)
             if start + window >= len(ids):
                 break
     return episodes
+
+
+def save_arrow_split(rows: list[dict], path: Path) -> None:
+    try:
+        from datasets import Dataset
+    except ImportError as exc:
+        raise RuntimeError("Arrow shard writing requires `pip install datasets`.") from exc
+    if path.exists():
+        import shutil
+        shutil.rmtree(path)
+    Dataset.from_list(rows).save_to_disk(str(path))
 
 
 def write_split(episodes: list[dict], out_dir: Path, eval_fraction: float, seed: int) -> None:
@@ -113,15 +125,13 @@ def write_split(episodes: list[dict], out_dir: Path, eval_fraction: float, seed:
     splits = {"eval": episodes[:n_eval], "train": episodes[n_eval:]}
     out_dir.mkdir(parents=True, exist_ok=True)
     for split, rows in splits.items():
-        with (out_dir / f"{split}.jsonl").open("w", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, separators=(",", ":")) + "\n")
-    meta = {"episodes": len(episodes), "train": len(splits["train"]), "eval": len(splits["eval"]), "schema": {"steps": [{"input_ids": "list[int]", "labels": "next-token list[int]"}]}}
+        save_arrow_split(rows, out_dir / split)
+    meta = {"format": "arrow", "episodes": len(episodes), "train": len(splits["train"]), "eval": len(splits["eval"]), "schema": {"steps": [{"input_ids": "list[int]", "labels": "next-token list[int], pad labels masked as -100"}]}}
     (out_dir / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare raw text into CREST episodic JSONL")
+    parser = argparse.ArgumentParser(description="Prepare raw text into CREST episodic Arrow shards")
     parser.add_argument("--input", default=None, help="Raw text file, JSONL with text field, or directory")
     parser.add_argument("--hf-dataset", default=None, help="Optional HuggingFace dataset name, e.g. Salesforce/wikitext")
     parser.add_argument("--hf-config", default=None, help="Optional HuggingFace dataset config, e.g. wikitext-103-raw-v1")
@@ -130,7 +140,7 @@ def main() -> None:
     parser.add_argument("--mock-download", action="store_true", help="Generate mock wikitext files instead of downloading from Kaggle")
     parser.add_argument("--text-field", default="text", help="Text field for JSONL/HuggingFace rows")
     parser.add_argument("--max-documents", type=int, default=None, help="Optional document cap for cheap smoke prep")
-    parser.add_argument("--out", required=True, help="Output directory containing train.jsonl/eval.jsonl")
+    parser.add_argument("--out", required=True, help="Output directory containing train/eval Arrow datasets")
     parser.add_argument("--tokenizer", default="byte", help="byte or HuggingFace tokenizer name, e.g. gpt2")
     parser.add_argument("--episode-steps", type=int, default=16)
     parser.add_argument("--step-length", type=int, default=128)
