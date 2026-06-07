@@ -4,11 +4,11 @@ datasets:
     split: train
     text_field: text
     max_documents: 50000
-    streaming: true
+    streaming: false
   - repo: tokyotech-llm/swallow-math
     split: train
     text_field: text
-    streaming: true
+    streaming: false
   - repo: codeparrot/github-code-clean
     split: train
     text_field: code
