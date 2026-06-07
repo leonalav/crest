@@ -1,0 +1,8 @@
+datasets:
+  - repo: HuggingFaceFW/fineweb-edu
+    subset: sample-10BT
+    split: train
+    text_field: text
+    max_documents: 50000
+    max_tokens: 10000000
+    streaming: true

@@ -1,0 +1,16 @@
+datasets:
+  - repo: HuggingFaceFW/fineweb-edu
+    subset: sample-10BT
+    split: train
+    text_field: text
+    max_documents: 50000
+    streaming: true
+  - repo: tokyotech-llm/swallow-math
+    split: train
+    text_field: text
+    streaming: true
+  - repo: codeparrot/github-code-clean
+    split: train
+    text_field: code
+    streaming: true
+    max_tokens: 1000000000
