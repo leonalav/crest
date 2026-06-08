@@ -315,22 +315,45 @@ class StreamingTextDataset(IterableDataset[Episode]):
 
 
 class RawTextDataset(IterableDataset[Episode]):
-    """Tokenize bounded local raw Arrow files during training."""
+    """Tokenize bounded local raw Arrow or JSONL files during training."""
 
-    def __init__(self, cfg: DataConfig, split: str = "train") -> None:
+    def __init__(self, cfg: DataConfig, split: str = "train", file_format: str = "arrow") -> None:
         if cfg.path is None:
             raise ValueError("RawTextDataset requires DataConfig.path")
         path = Path(cfg.path)
-        self.path = path / f"{split}.arrow" if path.is_dir() else path
+        suffix = ".jsonl" if file_format == "jsonl" else ".arrow"
+        self.path = path / f"{split}{suffix}" if path.is_dir() else path
         if not self.path.exists():
             raise FileNotFoundError(f"Raw text split not found at '{self.path}'")
         self.cfg = cfg
+        self.file_format = file_format
         tokenizer_name = cfg.metadata.get("tokenizer", "byte")
         self.text_field = cfg.metadata.get("text_field", "text")
         self.tokenizer = load_tokenizer(str(tokenizer_name))
         self.pad_token_id = int(tokenizer_meta(self.tokenizer)["pad_token_id"])
 
     def __iter__(self) -> Iterator[Episode]:
+        if self.file_format == "jsonl":
+            yield from self._iter_jsonl()
+            return
+        yield from self._iter_arrow()
+
+    def _iter_jsonl(self) -> Iterator[Episode]:
+        window = self.cfg.episode_steps * self.cfg.step_length + 1
+        stride = int(self.cfg.metadata.get("stride_tokens", self.cfg.episode_steps * self.cfg.step_length))
+        with self.path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                text = row.get(self.text_field)
+                if not text:
+                    continue
+                ids = encode_text(self.tokenizer, str(text))
+                for chunk in iter_windows(ids, window, stride, self.pad_token_id):
+                    yield episode_row_to_tensors(self._episode_from_window(chunk), self.cfg)
+
+    def _iter_arrow(self) -> Iterator[Episode]:
         try:
             import pyarrow as pa
         except ImportError as exc:
@@ -384,4 +407,6 @@ def build_dataset(cfg: DataConfig, split: str = "train") -> Dataset[Episode]:
         return StreamingTextDataset(cfg, split)
     if cfg.task == "raw_text":
         return RawTextDataset(cfg, split)
+    if cfg.task == "raw_jsonl":
+        return RawTextDataset(cfg, split, file_format="jsonl")
     raise ValueError(f"unknown data task {cfg.task!r}")

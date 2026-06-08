@@ -29,9 +29,10 @@ def main() -> None:
     parser.add_argument("--variant", default="crest", help="crest, no_state, or M<int>")
     parser.add_argument("--streaming", action="store_true", help="Ignore prepared shards and tokenize the data manifest online with HF streaming=True")
     parser.add_argument("--raw-text", action="store_true", help="Train from bounded raw Arrow files referenced by the data config")
+    parser.add_argument("--raw-jsonl", action="store_true", help="Train from bounded raw JSONL files referenced by the data config")
     args = parser.parse_args()
-    if args.streaming and args.raw_text:
-        raise ValueError("Use either --streaming or --raw-text, not both")
+    if sum(bool(x) for x in [args.streaming, args.raw_text, args.raw_jsonl]) > 1:
+        raise ValueError("Use only one of --streaming, --raw-text, or --raw-jsonl")
 
     model_cfg = load_dataclass(CRESTConfig, args.model)
     data_cfg = load_dataclass(DataConfig, args.data)
@@ -39,6 +40,8 @@ def main() -> None:
         data_cfg = replace(data_cfg, task="streaming_text", path=args.data)
     if args.raw_text:
         data_cfg = replace(data_cfg, task="raw_text")
+    if args.raw_jsonl:
+        data_cfg = replace(data_cfg, task="raw_jsonl")
     train_cfg = load_dataclass(TrainingConfig, args.training)
     variant = args.variant
     if variant == "crest":

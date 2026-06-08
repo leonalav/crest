@@ -494,6 +494,19 @@ PYTHONPATH=src python -m crest.cli_train_variant \
 
 `--raw-text` changes the loaded data task to `raw_text` and reads local `train.arrow` / `eval.arrow` files directly. `--raw-chunk-tokens` controls how aggressively long documents are split before writing; the default is one CREST episode worth of tokens.
 
+If the raw cache was produced as JSONL instead, use the second-class JSONL option:
+
+```bash
+PYTHONPATH=src python -m crest.cli_train_variant \
+  --model src/configs/models/default.yaml \
+  --data src/configs/data_manifests/default.yaml \
+  --training src/configs/training/default.yaml \
+  --variant M16 \
+  --raw-jsonl
+```
+
+`--raw-jsonl` reads local `train.jsonl` / `eval.jsonl` files and tokenizes them online. Use exactly one of `--streaming`, `--raw-text`, or `--raw-jsonl`.
+
 No-state comparison:
 
 ```bash
@@ -639,6 +652,15 @@ batch_size: 64
 ```
 
 For Llama 3 tokenizer models, the vocab head is large. Start with lower batch sizes.
+
+For Llama 3 runs, `batch_size` controls how many episodes the DataLoader returns, while `micro_batch_size` controls how many episodes are sent through the vocab head at once. Keep `micro_batch_size` small enough to fit logits memory:
+
+```yaml
+batch_size: 64
+micro_batch_size: 4
+```
+
+If a 128k-vocab run OOMs in `cross_entropy`, lower `micro_batch_size` first before lowering `batch_size`.
 
 ## 15. Success Criteria
 

@@ -147,7 +147,7 @@ def run_training(
         print(
             f"[startup] run={train_cfg.run_name} device={device} precision={train_cfg.precision} "
             f"params={report['parameters']:,} train_episodes={len(train_ds) if not train_is_stream else 'streaming'} eval_episodes={len(eval_ds) if not eval_is_stream else 'streaming'} "
-            f"max_steps={train_cfg.max_steps} output_dir={train_cfg.output_dir}",
+            f"batch_size={train_cfg.batch_size} micro_batch_size={train_cfg.micro_batch_size or train_cfg.batch_size} max_steps={train_cfg.max_steps} output_dir={train_cfg.output_dir}",
             flush=True,
         )
 
@@ -163,37 +163,44 @@ def run_training(
         except StopIteration:
             iterator = iter(train_loader)
             batch = next(iterator)
-        batch = type(batch)(input_ids=batch.input_ids.to(device), labels=batch.labels.to(device), step_idx=batch.step_idx.to(device))
+        batch = type(batch)(input_ids=batch.input_ids, labels=batch.labels, step_idx=batch.step_idx)
         lr = cosine_warmup_lr(step, train_cfg)
         set_lr(optimizer, lr)
         model.train()
         optimizer.zero_grad(set_to_none=True)
         b, t, _ = batch.input_ids.shape
-        state = crest_model.init_state(b, device=device, dtype=next(model.parameters()).dtype)
+        micro_batch_size = train_cfg.micro_batch_size or b
+        micro_batches = max(1, math.ceil(b / micro_batch_size))
         total_loss = None
         last_aux = None
-        with autocast_context(train_cfg.precision, device):
-            for start in range(0, t, train_cfg.tbptt_k):
-                chunk_loss = None
-                denom = min(train_cfg.tbptt_k, t - start)
-                for offset in range(start, start + denom):
-                    logits, state, aux = model(batch.input_ids[:, offset], state=state, step_idx=batch.step_idx[:, offset])
-                    loss = lm_loss(logits, batch.labels[:, offset]) + gate_target_loss(aux, train_cfg.gate_regularization_weight, train_cfg.gate_target)
-                    if aux_head is not None:
-                        loss = loss + train_cfg.aux_state_weight * aux_head(aux.final_state[-1], aux.hidden)
-                    chunk_loss = loss if chunk_loss is None else chunk_loss + loss
-                    last_aux = aux
-                assert chunk_loss is not None
-                total_loss = chunk_loss.detach() if total_loss is None else total_loss + chunk_loss.detach()
-                scaler.scale(chunk_loss / denom).backward()
-                state = detach_state(state)
+        for mb_start in range(0, b, micro_batch_size):
+            mb_end = min(b, mb_start + micro_batch_size)
+            input_ids = batch.input_ids[mb_start:mb_end].to(device)
+            labels = batch.labels[mb_start:mb_end].to(device)
+            step_idx = batch.step_idx[mb_start:mb_end].to(device)
+            state = crest_model.init_state(input_ids.size(0), device=device, dtype=next(model.parameters()).dtype)
+            with autocast_context(train_cfg.precision, device):
+                for start in range(0, t, train_cfg.tbptt_k):
+                    chunk_loss = None
+                    denom = min(train_cfg.tbptt_k, t - start)
+                    for offset in range(start, start + denom):
+                        logits, state, aux = model(input_ids[:, offset], state=state, step_idx=step_idx[:, offset])
+                        loss = lm_loss(logits, labels[:, offset]) + gate_target_loss(aux, train_cfg.gate_regularization_weight, train_cfg.gate_target)
+                        if aux_head is not None:
+                            loss = loss + train_cfg.aux_state_weight * aux_head(aux.final_state[-1], aux.hidden)
+                        chunk_loss = loss if chunk_loss is None else chunk_loss + loss
+                        last_aux = aux
+                    assert chunk_loss is not None
+                    total_loss = chunk_loss.detach() if total_loss is None else total_loss + chunk_loss.detach()
+                    scaler.scale(chunk_loss / (denom * micro_batches)).backward()
+                    state = detach_state(state)
         scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
 
         if step % train_cfg.log_every == 0:
-            train_metrics = {"event": "train", "loss": float(total_loss.item() / max(1, t)), "loss_sum": float(total_loss.item()), "lr": lr, "grad_norm": float(grad_norm), "gate_mean": float(last_aux.gate_mean.item()) if last_aux else 0.0}
+            train_metrics = {"event": "train", "loss": float(total_loss.item() / max(1, t * micro_batches)), "loss_sum": float(total_loss.item()), "lr": lr, "grad_norm": float(grad_norm), "gate_mean": float(last_aux.gate_mean.item()) if last_aux else 0.0}
             if logger:
                 logger.log(step, train_metrics)
             if distributed.is_main:
@@ -203,7 +210,7 @@ def run_training(
                     flush=True,
                 )
         if step > 0 and step % train_cfg.eval_every == 0:
-            metrics = evaluate(crest_model, eval_loader, device=device, max_batches=8)
+            metrics = evaluate(crest_model, eval_loader, device=device, max_batches=8, micro_batch_size=train_cfg.micro_batch_size)
             last_eval_metrics = metrics
             if logger:
                 logger.log(step, {"event": "eval", **metrics})
@@ -225,5 +232,5 @@ def run_training(
         save_checkpoint(str(final_path), crest_model, optimizer, step, extra=report)
         print(f"[done] step={step} final_checkpoint={final_path}", flush=True)
     if not last_eval_metrics:
-        last_eval_metrics = evaluate(crest_model, eval_loader, device=device, max_batches=8)
+        last_eval_metrics = evaluate(crest_model, eval_loader, device=device, max_batches=8, micro_batch_size=train_cfg.micro_batch_size)
     return {"step": step, "last_eval": last_eval_metrics, **report}

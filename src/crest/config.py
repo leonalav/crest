@@ -42,6 +42,7 @@ class CRESTConfig:
 class TrainingConfig:
     model: str = "debug"
     batch_size: int = 8
+    micro_batch_size: int = 0
     max_steps: int = 1000
     tbptt_k: int = 8
     learning_rate: float = 3e-4
