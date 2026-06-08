@@ -19,6 +19,10 @@ class ByteTokenizer:
     def encode(self, text: str) -> list[int]:
         return [self.bos_token_id] + [b + self.offset for b in text.encode("utf-8", errors="ignore")] + [self.eos_token_id]
 
+    def decode(self, ids: list[int]) -> str:
+        data = bytes(max(0, tok - self.offset) for tok in ids if tok >= self.offset)
+        return data.decode("utf-8", errors="ignore")
+
 
 def load_tokenizer(name: str):
     if name == "byte":

@@ -28,7 +28,7 @@ def main() -> None:
     parser.add_argument("--data", required=True, help="Path to data YAML")
     parser.add_argument("--training", required=True, help="Path to training YAML")
     parser.add_argument("--streaming", action="store_true", help="Ignore prepared shards and tokenize the data manifest online with HF streaming=True")
-    parser.add_argument("--raw-text", action="store_true", help="Train from bounded raw JSONL files referenced by the data config")
+    parser.add_argument("--raw-text", action="store_true", help="Train from bounded raw Arrow files referenced by the data config")
     args = parser.parse_args()
     if args.streaming and args.raw_text:
         raise ValueError("Use either --streaming or --raw-text, not both")

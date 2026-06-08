@@ -3,4 +3,5 @@ pytest>=8.0
 PyYAML>=6.0
 transformers>=4.40
 datasets>=2.18
+pyarrow>=14.0
 kagglehub>=0.2.0

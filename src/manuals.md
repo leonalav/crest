@@ -458,7 +458,7 @@ PYTHONPATH=src python -m crest.cli_train_variant \
 
 `--streaming` changes the loaded data task to `streaming_text`, forces each manifest source to `streaming=True`, and does not read or write Arrow/JSONL shards. The same option works with `crest.cli_train`.
 
-If you want lower RAM and a local disk cache instead of live streaming, materialize bounded raw JSONL files first:
+If you want lower RAM and a local disk cache instead of live streaming, materialize bounded raw Arrow files first:
 
 ```bash
 PYTHONPATH=src python -m crest.cli_prepare_manifest \
@@ -469,14 +469,15 @@ PYTHONPATH=src python -m crest.cli_prepare_manifest \
   --step-length 128 \
   --eval-fraction 0.02 \
   --max-tokens 10000000 \
+  --raw-chunk-tokens 2048 \
   --raw-text-only
 ```
 
 This writes:
 
 ```text
-data/raw_text/default/train.jsonl
-data/raw_text/default/eval.jsonl
+data/raw_text/default/train.arrow
+data/raw_text/default/eval.arrow
 data/raw_text/default/metadata.json
 ```
 
@@ -491,7 +492,7 @@ PYTHONPATH=src python -m crest.cli_train_variant \
   --raw-text
 ```
 
-`--raw-text` changes the loaded data task to `raw_text` and reads local `train.jsonl` / `eval.jsonl` files directly.
+`--raw-text` changes the loaded data task to `raw_text` and reads local `train.arrow` / `eval.arrow` files directly. `--raw-chunk-tokens` controls how aggressively long documents are split before writing; the default is one CREST episode worth of tokens.
 
 No-state comparison:
 
