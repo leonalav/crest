@@ -322,7 +322,11 @@ class RawTextDataset(IterableDataset[Episode]):
             raise ValueError("RawTextDataset requires DataConfig.path")
         path = Path(cfg.path)
         suffix = ".jsonl" if file_format == "jsonl" else ".arrow"
-        self.path = path / f"{split}{suffix}" if path.is_dir() else path
+        self.path = path if path.suffix else path / f"{split}{suffix}"
+        if not self.path.exists() and "episodic_arrow" in path.parts:
+            fallback = Path(*[("raw_text" if part == "episodic_arrow" else part) for part in path.parts]) / f"{split}{suffix}"
+            if fallback.exists():
+                self.path = fallback
         if not self.path.exists():
             raise FileNotFoundError(f"Raw text split not found at '{self.path}'")
         self.cfg = cfg

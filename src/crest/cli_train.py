@@ -30,6 +30,7 @@ def main() -> None:
     parser.add_argument("--streaming", action="store_true", help="Ignore prepared shards and tokenize the data manifest online with HF streaming=True")
     parser.add_argument("--raw-text", action="store_true", help="Train from bounded raw Arrow files referenced by the data config")
     parser.add_argument("--raw-jsonl", action="store_true", help="Train from bounded raw JSONL files referenced by the data config")
+    parser.add_argument("--raw-path", default=None, help="Override raw Arrow/JSONL directory or split file path")
     args = parser.parse_args()
     if sum(bool(x) for x in [args.streaming, args.raw_text, args.raw_jsonl]) > 1:
         raise ValueError("Use only one of --streaming, --raw-text, or --raw-jsonl")
@@ -38,9 +39,9 @@ def main() -> None:
     if args.streaming:
         data_cfg = replace(data_cfg, task="streaming_text", path=args.data)
     if args.raw_text:
-        data_cfg = replace(data_cfg, task="raw_text")
+        data_cfg = replace(data_cfg, task="raw_text", path=args.raw_path or data_cfg.path)
     if args.raw_jsonl:
-        data_cfg = replace(data_cfg, task="raw_jsonl")
+        data_cfg = replace(data_cfg, task="raw_jsonl", path=args.raw_path or data_cfg.path)
     train_cfg = load_dataclass(TrainingConfig, args.training)
     dist = init_distributed()
     # FSDP is exposed for launch scripts; run_training constructs a non-wrapped model

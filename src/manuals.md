@@ -502,10 +502,11 @@ PYTHONPATH=src python -m crest.cli_train_variant \
   --data src/configs/data_manifests/default.yaml \
   --training src/configs/training/default.yaml \
   --variant M16 \
-  --raw-jsonl
+  --raw-jsonl \
+  --raw-path data/raw_text/default
 ```
 
-`--raw-jsonl` reads local `train.jsonl` / `eval.jsonl` files and tokenizes them online. Use exactly one of `--streaming`, `--raw-text`, or `--raw-jsonl`.
+`--raw-jsonl` reads local `train.jsonl` / `eval.jsonl` files and tokenizes them online. `--raw-path` can point at the raw cache directory or at a single split file. Use exactly one of `--streaming`, `--raw-text`, or `--raw-jsonl`.
 
 No-state comparison:
 
