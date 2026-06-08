@@ -57,7 +57,7 @@ Important paths:
 src/crest/
   model.py                  CRESTModel forward API
   layers.py                 local attention, state read, state write, RMSNorm, SwiGLU
-  data.py                   synthetic and JSONL episodic datasets
+  data.py                   synthetic, Arrow, JSONL, and streaming episodic datasets
   train.py                  training loop, DDP, mixed precision, checkpointing
   eval.py                   eval metrics
   cli_train.py              train standard config
@@ -78,10 +78,10 @@ src/configs/models/
 
 src/configs/data/
   synthetic task configs
-  episodic JSONL configs
+  legacy episodic JSONL configs
 
 src/configs/data_manifests/
-  manifest YAMLs for multi-source Hugging Face preparation
+  manifest YAMLs for multi-source Hugging Face prep and streaming training
 
 src/configs/training/
   debug and hardware-specific training configs
@@ -91,7 +91,9 @@ src/configs/training/
 
 ### Episodes And Steps
 
-CREST data is stored as JSONL rows. Each row is one episode:
+CREST real-text data is stored as episodic rows. New prep writes Hugging Face Arrow datasets under `train/` and `eval/`. Legacy JSONL still loads, but new real-text runs should use Arrow or direct streaming.
+
+Each row is one episode:
 
 ```json
 {"steps":[{"input_ids":[1,2,3],"labels":[2,3,4]}]}
@@ -400,8 +402,7 @@ Prepare:
 ```bash
 PYTHONPATH=src python -m crest.cli_prepare_manifest \
   --manifest src/configs/data_manifests/default.yaml \
-  --name default \
-  --out data/default \
+  --out data/episodic_arrow/default \
   --tokenizer meta-llama/Meta-Llama-3-8B \
   --episode-steps 16 \
   --step-length 128 \
@@ -416,30 +417,56 @@ PYTHONPATH=src python -m crest.cli_prepare_manifest \
 This writes:
 
 ```text
-data/default/train.jsonl
-data/default/eval.jsonl
-data/default/metadata.json
-src/configs/data/default.yaml
+data/episodic_arrow/default/train/
+data/episodic_arrow/default/eval/
+data/episodic_arrow/default/metadata.json
 ```
+
+It also updates `src/configs/data_manifests/default.yaml` in place with:
+
+```yaml
+format: arrow
+task: arrow_episodic
+path: data/episodic_arrow/default
+vocab_size: 128256
+metadata:
+  tokenizer: meta-llama/Meta-Llama-3-8B
+```
+
+Do not create a separate data YAML for this path. The manifest is the data config.
 
 Train:
 
 ```bash
 PYTHONPATH=src python -m crest.cli_train_variant \
   --model src/configs/models/default.yaml \
-  --data src/configs/data/default.yaml \
+  --data src/configs/data_manifests/default.yaml \
   --training src/configs/training/default.yaml \
   --variant M16
 ```
+
+Train without pretokenization by streaming Hugging Face data and tokenizing online:
+
+```bash
+PYTHONPATH=src python -m crest.cli_train_variant \
+  --model src/configs/models/default.yaml \
+  --data src/configs/data_manifests/default.yaml \
+  --training src/configs/training/default.yaml \
+  --variant M16 \
+  --streaming
+```
+
+`--streaming` changes the loaded data task to `streaming_text`, forces each manifest source to `streaming=True`, and does not read or write Arrow/JSONL shards. The same option works with `crest.cli_train`.
 
 No-state comparison:
 
 ```bash
 PYTHONPATH=src python -m crest.cli_train_variant \
   --model src/configs/models/default.yaml \
-  --data src/configs/data/default.yaml \
+  --data src/configs/data_manifests/default.yaml \
   --training src/configs/training/default.yaml \
-  --variant no_state
+  --variant no_state \
+  --streaming
 ```
 
 If Llama tokenizer access fails, use `gpt2` as an open fallback, but then use a GPT-2 vocab-sized model config.
@@ -469,7 +496,7 @@ datasets:
     streaming: true
 ```
 
-Then run `cli_prepare_manifest.py` with a new `--name` and `--out`.
+Then either run `cli_prepare_manifest.py` with `--out data/episodic_arrow/default` to refresh Arrow shards, or train directly with `--streaming`. Do not create a new YAML unless there is a real separate experiment that needs to be preserved.
 
 ## 12. Generation Status
 
@@ -509,7 +536,7 @@ first real dataset: FineWeb-Edu sample-10BT
 Run order:
 
 ```text
-1. Prepare FineWeb-Edu with Llama 3 tokenizer.
+1. Train default M16 with `--streaming` for immediate runs, or prepare Arrow shards when you want deterministic reusable data.
 2. Train default M16.
 3. Run no_state comparison.
 4. Run synthetic medium multi-hop regression occasionally.

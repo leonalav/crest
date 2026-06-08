@@ -27,10 +27,13 @@ def main() -> None:
     parser.add_argument("--data", required=True)
     parser.add_argument("--training", required=True)
     parser.add_argument("--variant", default="crest", help="crest, no_state, or M<int>")
+    parser.add_argument("--streaming", action="store_true", help="Ignore prepared shards and tokenize the data manifest online with HF streaming=True")
     args = parser.parse_args()
 
     model_cfg = load_dataclass(CRESTConfig, args.model)
     data_cfg = load_dataclass(DataConfig, args.data)
+    if args.streaming:
+        data_cfg = replace(data_cfg, task="streaming_text", path=args.data)
     train_cfg = load_dataclass(TrainingConfig, args.training)
     variant = args.variant
     if variant == "crest":

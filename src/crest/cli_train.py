@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import TypeVar
 
@@ -27,9 +27,12 @@ def main() -> None:
     parser.add_argument("--model", required=True, help="Path to model YAML")
     parser.add_argument("--data", required=True, help="Path to data YAML")
     parser.add_argument("--training", required=True, help="Path to training YAML")
+    parser.add_argument("--streaming", action="store_true", help="Ignore prepared shards and tokenize the data manifest online with HF streaming=True")
     args = parser.parse_args()
     model_cfg = load_dataclass(CRESTConfig, args.model)
     data_cfg = load_dataclass(DataConfig, args.data)
+    if args.streaming:
+        data_cfg = replace(data_cfg, task="streaming_text", path=args.data)
     train_cfg = load_dataclass(TrainingConfig, args.training)
     dist = init_distributed()
     # FSDP is exposed for launch scripts; run_training constructs a non-wrapped model

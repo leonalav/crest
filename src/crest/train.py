@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from torch.utils.data.distributed import DistributedSampler
 
 from .auxiliary import StateReconstructionHead
@@ -125,9 +125,11 @@ def run_training(
 
     train_ds = build_dataset(data_cfg, "train")
     eval_ds = build_dataset(data_cfg, "eval")
-    train_sampler = DistributedSampler(train_ds, num_replicas=distributed.world_size, rank=distributed.rank, shuffle=True) if distributed.enabled else None
-    eval_sampler = DistributedSampler(eval_ds, num_replicas=distributed.world_size, rank=distributed.rank, shuffle=False) if distributed.enabled else None
-    train_loader = DataLoader(train_ds, batch_size=train_cfg.batch_size, shuffle=train_sampler is None, sampler=train_sampler, num_workers=train_cfg.num_workers, collate_fn=collate_episodes, drop_last=True)
+    train_is_stream = isinstance(train_ds, IterableDataset)
+    eval_is_stream = isinstance(eval_ds, IterableDataset)
+    train_sampler = DistributedSampler(train_ds, num_replicas=distributed.world_size, rank=distributed.rank, shuffle=True) if distributed.enabled and not train_is_stream else None
+    eval_sampler = DistributedSampler(eval_ds, num_replicas=distributed.world_size, rank=distributed.rank, shuffle=False) if distributed.enabled and not eval_is_stream else None
+    train_loader = DataLoader(train_ds, batch_size=train_cfg.batch_size, shuffle=(train_sampler is None and not train_is_stream), sampler=train_sampler, num_workers=train_cfg.num_workers, collate_fn=collate_episodes, drop_last=True)
     eval_loader = DataLoader(eval_ds, batch_size=train_cfg.batch_size, shuffle=False, sampler=eval_sampler, num_workers=train_cfg.num_workers, collate_fn=collate_episodes)
 
     logger = JsonlLogger(train_cfg.output_dir, train_cfg.run_name) if distributed.is_main else None
@@ -144,7 +146,7 @@ def run_training(
     if distributed.is_main:
         print(
             f"[startup] run={train_cfg.run_name} device={device} precision={train_cfg.precision} "
-            f"params={report['parameters']:,} train_episodes={len(train_ds)} eval_episodes={len(eval_ds)} "
+            f"params={report['parameters']:,} train_episodes={len(train_ds) if not train_is_stream else 'streaming'} eval_episodes={len(eval_ds) if not eval_is_stream else 'streaming'} "
             f"max_steps={train_cfg.max_steps} output_dir={train_cfg.output_dir}",
             flush=True,
         )

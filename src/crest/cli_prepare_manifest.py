@@ -13,7 +13,10 @@ from .cli_prepare_text import encode_text, load_tokenizer, save_arrow_split
 
 
 def tokenizer_meta(tokenizer) -> dict:
-    vocab_size = int(len(tokenizer))
+    try:
+        vocab_size = int(len(tokenizer))
+    except TypeError:
+        vocab_size = int(getattr(tokenizer, "vocab_size", 0))
     pad_id = getattr(tokenizer, "pad_token_id", None)
     eos_id = getattr(tokenizer, "eos_token_id", None)
     bos_id = getattr(tokenizer, "bos_token_id", None)

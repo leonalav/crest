@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import dataclass
+from typing import Iterator
 
 import torch
 from pathlib import Path
 
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset
 
 from .config import DataConfig
+from .cli_prepare_manifest import iter_windows, load_hf_dataset, tokenizer_meta
+from .cli_prepare_text import encode_text, load_tokenizer
 
 
 @dataclass(frozen=True)
@@ -235,6 +238,82 @@ class ArrowEpisodicDataset(Dataset[Episode]):
         return Episode(torch.tensor(input_steps), torch.tensor(label_steps), torch.arange(self.cfg.episode_steps))
 
 
+def episode_row_to_tensors(row: dict, cfg: DataConfig) -> Episode:
+    steps = row["steps"][: cfg.episode_steps]
+    input_steps, label_steps = [], []
+    for step in steps:
+        ids = list(step["input_ids"][: cfg.step_length])
+        labels = list(step["labels"][: cfg.step_length]) if "labels" in step else ids[1:] + [-100]
+        ids += [0] * max(0, cfg.step_length - len(ids))
+        labels += [-100] * max(0, cfg.step_length - len(labels))
+        input_steps.append(ids)
+        label_steps.append(labels)
+    while len(input_steps) < cfg.episode_steps:
+        input_steps.append([0] * cfg.step_length)
+        label_steps.append([-100] * cfg.step_length)
+    return Episode(torch.tensor(input_steps), torch.tensor(label_steps), torch.arange(cfg.episode_steps))
+
+
+class StreamingTextDataset(IterableDataset[Episode]):
+    """Tokenize Hugging Face manifest sources online instead of using prepared shards."""
+
+    def __init__(self, cfg: DataConfig, split: str = "train") -> None:
+        if cfg.path is None:
+            raise ValueError("StreamingTextDataset requires DataConfig.path pointing to a manifest YAML")
+        try:
+            import yaml
+        except ImportError as exc:
+            raise RuntimeError("Streaming text datasets require `pip install PyYAML`.") from exc
+        manifest = yaml.safe_load(Path(cfg.path).read_text(encoding="utf-8")) or {}
+        items = manifest.get("datasets")
+        if not isinstance(items, list) or not items:
+            raise ValueError("streaming_text manifest must contain a non-empty `datasets` list")
+        self.items = items
+        self.cfg = cfg
+        self.split = split
+        tokenizer_name = cfg.metadata.get("tokenizer", manifest.get("metadata", {}).get("tokenizer", "byte"))
+        self.tokenizer = load_tokenizer(str(tokenizer_name))
+        self.pad_token_id = int(tokenizer_meta(self.tokenizer)["pad_token_id"])
+
+    def __iter__(self) -> Iterator[Episode]:
+        window = self.cfg.episode_steps * self.cfg.step_length + 1
+        stride = int(self.cfg.metadata.get("stride_tokens", self.cfg.episode_steps * self.cfg.step_length))
+        for item in self.items:
+            stream_item = dict(item)
+            stream_item["streaming"] = True
+            if self.split == "eval" and "eval_split" in stream_item:
+                stream_item["split"] = stream_item["eval_split"]
+            ds = load_hf_dataset(stream_item)
+            text_field = stream_item.get("text_field", "text")
+            max_documents = stream_item.get("max_documents")
+            docs = 0
+            for row in ds:
+                text = row.get(text_field)
+                if not text:
+                    continue
+                docs += 1
+                ids = encode_text(self.tokenizer, str(text))
+                for chunk in iter_windows(ids, window, stride, self.pad_token_id):
+                    yield episode_row_to_tensors(self._episode_from_window(chunk), self.cfg)
+                if max_documents is not None and docs >= int(max_documents):
+                    break
+
+    def _episode_from_window(self, tokens: list[int]) -> dict:
+        needed = self.cfg.episode_steps * self.cfg.step_length
+        tokens = tokens[: needed + 1]
+        if len(tokens) < needed + 1:
+            tokens = tokens + [self.pad_token_id] * (needed + 1 - len(tokens))
+        inputs = tokens[:-1]
+        labels = tokens[1:]
+        steps = []
+        for step_idx in range(self.cfg.episode_steps):
+            start = step_idx * self.cfg.step_length
+            end = start + self.cfg.step_length
+            label_chunk = [-100 if tok == self.pad_token_id else tok for tok in labels[start:end]]
+            steps.append({"input_ids": inputs[start:end], "labels": label_chunk})
+        return {"steps": steps}
+
+
 def build_dataset(cfg: DataConfig, split: str = "train") -> Dataset[Episode]:
     if cfg.task in {"key_value_recall", "overwrite_recall"}:
         return SyntheticKeyValueDataset(cfg, split)
@@ -248,4 +327,6 @@ def build_dataset(cfg: DataConfig, split: str = "train") -> Dataset[Episode]:
         return JsonlEpisodicDataset(cfg, split)
     if cfg.task == "arrow_episodic":
         return ArrowEpisodicDataset(cfg, split)
+    if cfg.task == "streaming_text":
+        return StreamingTextDataset(cfg, split)
     raise ValueError(f"unknown data task {cfg.task!r}")
