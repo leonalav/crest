@@ -314,6 +314,53 @@ class StreamingTextDataset(IterableDataset[Episode]):
         return {"steps": steps}
 
 
+class RawTextDataset(IterableDataset[Episode]):
+    """Tokenize bounded local raw JSONL files during training."""
+
+    def __init__(self, cfg: DataConfig, split: str = "train") -> None:
+        if cfg.path is None:
+            raise ValueError("RawTextDataset requires DataConfig.path")
+        path = Path(cfg.path)
+        self.path = path / f"{split}.jsonl" if path.is_dir() else path
+        if not self.path.exists():
+            raise FileNotFoundError(f"Raw text split not found at '{self.path}'")
+        self.cfg = cfg
+        tokenizer_name = cfg.metadata.get("tokenizer", "byte")
+        self.text_field = cfg.metadata.get("text_field", "text")
+        self.tokenizer = load_tokenizer(str(tokenizer_name))
+        self.pad_token_id = int(tokenizer_meta(self.tokenizer)["pad_token_id"])
+
+    def __iter__(self) -> Iterator[Episode]:
+        window = self.cfg.episode_steps * self.cfg.step_length + 1
+        stride = int(self.cfg.metadata.get("stride_tokens", self.cfg.episode_steps * self.cfg.step_length))
+        with self.path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                text = row.get(self.text_field)
+                if not text:
+                    continue
+                ids = encode_text(self.tokenizer, str(text))
+                for chunk in iter_windows(ids, window, stride, self.pad_token_id):
+                    yield episode_row_to_tensors(self._episode_from_window(chunk), self.cfg)
+
+    def _episode_from_window(self, tokens: list[int]) -> dict:
+        needed = self.cfg.episode_steps * self.cfg.step_length
+        tokens = tokens[: needed + 1]
+        if len(tokens) < needed + 1:
+            tokens = tokens + [self.pad_token_id] * (needed + 1 - len(tokens))
+        inputs = tokens[:-1]
+        labels = tokens[1:]
+        steps = []
+        for step_idx in range(self.cfg.episode_steps):
+            start = step_idx * self.cfg.step_length
+            end = start + self.cfg.step_length
+            label_chunk = [-100 if tok == self.pad_token_id else tok for tok in labels[start:end]]
+            steps.append({"input_ids": inputs[start:end], "labels": label_chunk})
+        return {"steps": steps}
+
+
 def build_dataset(cfg: DataConfig, split: str = "train") -> Dataset[Episode]:
     if cfg.task in {"key_value_recall", "overwrite_recall"}:
         return SyntheticKeyValueDataset(cfg, split)
@@ -329,4 +376,6 @@ def build_dataset(cfg: DataConfig, split: str = "train") -> Dataset[Episode]:
         return ArrowEpisodicDataset(cfg, split)
     if cfg.task == "streaming_text":
         return StreamingTextDataset(cfg, split)
+    if cfg.task == "raw_text":
+        return RawTextDataset(cfg, split)
     raise ValueError(f"unknown data task {cfg.task!r}")

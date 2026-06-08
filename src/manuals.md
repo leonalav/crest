@@ -458,6 +458,41 @@ PYTHONPATH=src python -m crest.cli_train_variant \
 
 `--streaming` changes the loaded data task to `streaming_text`, forces each manifest source to `streaming=True`, and does not read or write Arrow/JSONL shards. The same option works with `crest.cli_train`.
 
+If you want lower RAM and a local disk cache instead of live streaming, materialize bounded raw JSONL files first:
+
+```bash
+PYTHONPATH=src python -m crest.cli_prepare_manifest \
+  --manifest src/configs/data_manifests/default.yaml \
+  --out data/raw_text/default \
+  --tokenizer meta-llama/Meta-Llama-3-8B \
+  --episode-steps 16 \
+  --step-length 128 \
+  --eval-fraction 0.02 \
+  --max-tokens 10000000 \
+  --raw-text-only
+```
+
+This writes:
+
+```text
+data/raw_text/default/train.jsonl
+data/raw_text/default/eval.jsonl
+data/raw_text/default/metadata.json
+```
+
+Then train from the raw files without pretokenization:
+
+```bash
+PYTHONPATH=src python -m crest.cli_train_variant \
+  --model src/configs/models/default.yaml \
+  --data src/configs/data_manifests/default.yaml \
+  --training src/configs/training/default.yaml \
+  --variant M16 \
+  --raw-text
+```
+
+`--raw-text` changes the loaded data task to `raw_text` and reads local `train.jsonl` / `eval.jsonl` files directly.
+
 No-state comparison:
 
 ```bash
@@ -496,7 +531,7 @@ datasets:
     streaming: true
 ```
 
-Then either run `cli_prepare_manifest.py` with `--out data/episodic_arrow/default` to refresh Arrow shards, or train directly with `--streaming`. Do not create a new YAML unless there is a real separate experiment that needs to be preserved.
+Then either run `cli_prepare_manifest.py` with `--out data/episodic_arrow/default` to refresh Arrow shards, or train directly with `--streaming` or `--raw-text`. Do not create a new YAML unless there is a real separate experiment that needs to be preserved.
 
 ## 12. Generation Status
 

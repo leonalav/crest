@@ -172,6 +172,60 @@ def prepare_manifest(args, items: list[dict], tokenizer) -> dict:
     return {"episodes": total_episodes, "train": split_counts["train"], "eval": split_counts["eval"], "tokens": total_tokens, "sources": source_stats, **meta}
 
 
+def prepare_raw_text(args, items: list[dict], tokenizer) -> dict:
+    meta = tokenizer_meta(tokenizer)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    train_path = out_dir / "train.jsonl"
+    eval_path = out_dir / "eval.jsonl"
+    total_tokens = 0
+    total_docs = 0
+    split_counts = {"train": 0, "eval": 0}
+    source_stats = []
+    with train_path.open("w", encoding="utf-8") as train_f, eval_path.open("w", encoding="utf-8") as eval_f:
+        for item in items:
+            ds = load_hf_dataset(item)
+            text_field = item.get("text_field", "text")
+            max_documents = item.get("max_documents", args.max_documents)
+            max_tokens = item.get("max_tokens", args.max_tokens_per_dataset)
+            source_tokens = 0
+            source_docs = 0
+            for row in ds:
+                text = row.get(text_field)
+                if not text:
+                    continue
+                ids = encode_text(tokenizer, str(text))
+                if max_tokens is not None and source_tokens >= int(max_tokens):
+                    break
+                remaining_source = None if max_tokens is None else max(0, int(max_tokens) - source_tokens)
+                remaining_global = None if args.max_tokens is None else max(0, int(args.max_tokens) - total_tokens)
+                remaining_limits = [x for x in [remaining_source, remaining_global] if x is not None]
+                if remaining_limits and min(remaining_limits) <= 0:
+                    break
+                if remaining_limits and len(ids) > min(remaining_limits):
+                    break
+                source_tokens += len(ids)
+                total_tokens += len(ids)
+                split = split_for_episode(total_docs, args.eval_fraction, args.seed)
+                target = eval_f if split == "eval" else train_f
+                target.write(json.dumps({"text": str(text)}, ensure_ascii=False, separators=(",", ":")) + "\n")
+                split_counts[split] += 1
+                total_docs += 1
+                source_docs += 1
+                if max_documents is not None and source_docs >= int(max_documents):
+                    break
+                if args.max_tokens is not None and total_tokens >= int(args.max_tokens):
+                    break
+            source_stats.append({"repo": item["repo"], "subset": item.get("subset"), "split": item.get("split", "train"), "documents": source_docs, "tokens": source_tokens})
+            print(f"[prepare_manifest] raw source done docs={source_docs} tokens={source_tokens}", flush=True)
+            maybe_cleanup_cache(item, args.cleanup_cache)
+            if args.max_tokens is not None and total_tokens >= int(args.max_tokens):
+                break
+    if total_docs == 0:
+        raise RuntimeError("No raw text documents produced from manifest")
+    return {"documents": total_docs, "train": split_counts["train"], "eval": split_counts["eval"], "tokens": total_tokens, "sources": source_stats, **meta}
+
+
 def update_manifest_config(manifest_path: Path, out_dir: Path, tokenizer_name: str, episode_steps: int, step_length: int, meta: dict) -> None:
     cfg = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
     cfg["format"] = "arrow"
@@ -185,6 +239,21 @@ def update_manifest_config(manifest_path: Path, out_dir: Path, tokenizer_name: s
     cfg["metadata"] = {"tokenizer": tokenizer_name, "pad_token_id": meta.get("pad_token_id"), "eos_token_id": meta.get("eos_token_id")}
     manifest_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     print(f"[prepare_manifest] updated manifest config {manifest_path}", flush=True)
+
+
+def update_raw_manifest_config(manifest_path: Path, out_dir: Path, tokenizer_name: str, episode_steps: int, step_length: int, meta: dict) -> None:
+    cfg = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    cfg["format"] = "raw_text"
+    cfg["task"] = "raw_text"
+    cfg["path"] = str(out_dir).replace("\\", "/")
+    cfg["episode_steps"] = episode_steps
+    cfg["step_length"] = step_length
+    cfg["train_episodes"] = 0
+    cfg["eval_episodes"] = 0
+    cfg["vocab_size"] = int(meta["vocab_size"])
+    cfg["metadata"] = {"tokenizer": tokenizer_name, "pad_token_id": meta.get("pad_token_id"), "eos_token_id": meta.get("eos_token_id"), "text_field": "text"}
+    manifest_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    print(f"[prepare_manifest] updated raw manifest config {manifest_path}", flush=True)
 
 
 def main() -> None:
@@ -202,6 +271,7 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=None, help="Global hard token cap across all datasets")
     parser.add_argument("--max-episodes", type=int, default=None, help="Global hard episode cap")
     parser.add_argument("--cleanup-cache", action="store_true", help="Remove HF dataset cache for each source after it is processed")
+    parser.add_argument("--raw-text-only", action="store_true", help="Download bounded raw text JSONL files instead of pretokenized Arrow shards")
     parser.add_argument("--seed", type=int, default=1337)
     args = parser.parse_args()
 
@@ -210,8 +280,15 @@ def main() -> None:
     if not isinstance(items, list) or not items:
         raise ValueError("manifest must contain a non-empty `datasets` list")
     tokenizer = load_tokenizer(args.tokenizer)
-    meta = prepare_manifest(args, items, tokenizer)
     out_dir = Path(args.out)
+    if args.raw_text_only:
+        meta = prepare_raw_text(args, items, tokenizer)
+        metadata = {"format": "raw_text", "schema": {"text": "raw document text"}, "tokenizer": args.tokenizer, "manifest": manifest, "episode_steps": args.episode_steps, "step_length": args.step_length, **meta}
+        (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        update_raw_manifest_config(Path(args.manifest), out_dir, args.tokenizer, args.episode_steps, args.step_length, meta)
+        print(f"[prepare_manifest] wrote {meta['documents']} raw documents, {meta['tokens']} tokens to {out_dir}", flush=True)
+        return
+    meta = prepare_manifest(args, items, tokenizer)
     metadata = {"format": "arrow", "schema": {"steps": [{"input_ids": "list[int]", "labels": "next-token list[int], pad labels masked as -100"}]}, "tokenizer": args.tokenizer, "manifest": manifest, "episode_steps": args.episode_steps, "step_length": args.step_length, **meta}
     (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     update_manifest_config(Path(args.manifest), out_dir, args.tokenizer, args.episode_steps, args.step_length, meta)
