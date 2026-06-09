@@ -77,7 +77,7 @@ class MultiHeadAttention(nn.Module):
         b, l, d = x.shape
         return x.view(b, l, self.n_heads, self.head_dim).transpose(1, 2)
 
-    def forward(self, query: torch.Tensor, key_value: torch.Tensor, *, causal: bool = False, rope: bool = False, rope_base: float = 10000.0) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, query: torch.Tensor, key_value: torch.Tensor, *, causal: bool = False, rope: bool = False, rope_base: float = 10000.0) -> tuple[torch.Tensor, torch.Tensor | None]:
         q = self._split(self.q(query))
         k = self._split(self.k(key_value))
         v = self._split(self.v(key_value))
@@ -85,18 +85,34 @@ class MultiHeadAttention(nn.Module):
             cos, sin = rope_frequencies(self.head_dim, q.size(-2), rope_base, q.device)
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
-        mask = None
+        # Use is_causal=True (FlashAttention-eligible) when query and key lengths match
+        # (i.e. local self-attention). Only fall back to an explicit float mask when
+        # causal=True but lq != lk (cross-attention with causal masking).
+        use_causal_kernel = causal and q.size(-2) == k.size(-2)
         bool_mask = None
-        if causal:
+        if causal and not use_causal_kernel:
             lq, lk = q.size(-2), k.size(-2)
             bool_mask = torch.ones(lq, lk, device=q.device, dtype=torch.bool).triu(1)
             mask = torch.zeros(lq, lk, device=q.device, dtype=q.dtype).masked_fill(bool_mask, float("-inf"))
+        else:
+            mask = None
         with self.backend_policy.context():
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0, is_causal=False)
-        logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if bool_mask is not None:
-            logits = logits.masked_fill(bool_mask, float("-inf"))
-        probs = torch.softmax(logits, dim=-1)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0, is_causal=use_causal_kernel)
+        probs = None
+        if not self.training:
+            # Diagnostic-only: compute attention probabilities for entropy logging.
+            # Runs under no_grad to avoid building an autograd graph and to avoid
+            # wasting GPU memory on a second set of attention logits during training.
+            with torch.no_grad():
+                logits = torch.matmul(q.detach(), k.detach().transpose(-2, -1)) / math.sqrt(self.head_dim)
+                if causal:
+                    # Reuse bool_mask if already computed; otherwise build it for
+                    # the equal-length (use_causal_kernel) case.
+                    if bool_mask is None:
+                        lq, lk = q.size(-2), k.size(-2)
+                        bool_mask = torch.ones(lq, lk, device=q.device, dtype=torch.bool).triu(1)
+                    logits = logits.masked_fill(bool_mask, float("-inf"))
+                probs = torch.softmax(logits, dim=-1)
         y = y.transpose(1, 2).contiguous().view(query.size(0), query.size(1), -1)
         return self.o(y), probs
 
@@ -131,7 +147,7 @@ class StateWriter(nn.Module):
         b, l, d = x.shape
         return x.view(b, l, self.n_heads, self.head_dim).transpose(1, 2)
 
-    def forward(self, state: torch.Tensor, tokens: torch.Tensor, step_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, state: torch.Tensor, tokens: torch.Tensor, step_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         slot_ids = torch.arange(state.size(1), device=state.device)
         slot = self.slot_embed(slot_ids).unsqueeze(0).expand_as(state)
         q = self._split(self.q(state + slot))
@@ -139,8 +155,14 @@ class StateWriter(nn.Module):
         v = self._split(self.v(tokens))
         with self.backend_policy.context():
             update = F.scaled_dot_product_attention(q, k, v)
-        logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        probs = torch.softmax(logits, dim=-1)
+        probs = None
+        if not self.training:
+            # Diagnostic-only: compute write attention probabilities for entropy
+            # logging. Wrapped in no_grad to avoid a duplicate autograd graph and
+            # wasted memory bandwidth from recomputing the attention matrix.
+            with torch.no_grad():
+                logits = torch.matmul(q.detach(), k.detach().transpose(-2, -1)) / math.sqrt(self.head_dim)
+                probs = torch.softmax(logits, dim=-1)
         update = update.transpose(1, 2).contiguous().view(state.size(0), state.size(1), -1)
         step = self.step_embed(step_idx.clamp_min(0).clamp_max(self.step_embed.num_embeddings - 1)).unsqueeze(1).expand_as(state)
         retention = torch.sigmoid(self.gate(torch.cat([state, update, step, slot], dim=-1)))
@@ -169,7 +191,7 @@ class CRESTLayer(nn.Module):
             read, read_probs = self.state_read(x_norm, s_norm, causal=False, rope=False)
         else:
             read = torch.zeros_like(local)
-            read_probs = torch.full((x.size(0), self.cfg.n_heads, x.size(1), state.size(1)), 1.0 / state.size(1), device=x.device, dtype=x.dtype)
+            read_probs = None if self.training else torch.full((x.size(0), self.cfg.n_heads, x.size(1), state.size(1)), 1.0 / state.size(1), device=x.device, dtype=x.dtype)
         fuse_gate = torch.sigmoid(self.fuse(torch.cat([local, read], dim=-1)))
         x = x + fuse_gate * local + (1.0 - fuse_gate) * read
         x = x + self.ffn(self.x_norm2(x))
@@ -178,7 +200,15 @@ class CRESTLayer(nn.Module):
         else:
             next_state = state
             gate = torch.ones_like(state)
-            write_probs = torch.full((x.size(0), self.cfg.n_heads, state.size(1), x.size(1)), 1.0 / x.size(1), device=x.device, dtype=x.dtype)
-        read_entropy = -(read_probs.clamp_min(1e-9) * read_probs.clamp_min(1e-9).log()).sum(dim=-1).mean()
-        write_entropy = -(write_probs.clamp_min(1e-9) * write_probs.clamp_min(1e-9).log()).sum(dim=-1).mean()
+            write_probs = None if self.training else torch.full((x.size(0), self.cfg.n_heads, state.size(1), x.size(1)), 1.0 / x.size(1), device=x.device, dtype=x.dtype)
+        if read_probs is None:
+            read_entropy = x.new_zeros(())
+        else:
+            read_probs = read_probs.clamp_min(1e-9)
+            read_entropy = -(read_probs * read_probs.log()).sum(dim=-1).mean()
+        if write_probs is None:
+            write_entropy = x.new_zeros(())
+        else:
+            write_probs = write_probs.clamp_min(1e-9)
+            write_entropy = -(write_probs * write_probs.log()).sum(dim=-1).mean()
         return x, next_state, LayerAux(gate=gate, state_read_entropy=read_entropy, write_entropy=write_entropy)

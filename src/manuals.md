@@ -376,7 +376,7 @@ CREST is modestly but consistently better on WikiText at debug-plus scale.
 
 ## 10. Preparing FineWeb-Edu With Llama 3 Tokenizer
 
-Use manifest-based prep for real-world datasets.
+Use manifest-based prep for real-world datasets. The recommended path is pretokenized Arrow episodes. Do this once, then train without `--raw-jsonl`, `--raw-text`, or `--streaming`.
 
 Manifest:
 
@@ -397,7 +397,7 @@ datasets:
     streaming: true
 ```
 
-Prepare:
+Prepare pretokenized Arrow episodes:
 
 ```bash
 PYTHONPATH=src python -m crest.cli_prepare_manifest \
@@ -435,7 +435,7 @@ metadata:
 
 Do not create a separate data YAML for this path. The manifest is the data config.
 
-Train:
+Train from pretokenized Arrow episodes:
 
 ```bash
 PYTHONPATH=src python -m crest.cli_train_variant \
@@ -456,7 +456,7 @@ PYTHONPATH=src python -m crest.cli_train_variant \
   --streaming
 ```
 
-`--streaming` changes the loaded data task to `streaming_text`, forces each manifest source to `streaming=True`, and does not read or write Arrow/JSONL shards. The same option works with `crest.cli_train`.
+`--streaming` changes the loaded data task to `streaming_text`, forces each manifest source to `streaming=True`, and does not read or write Arrow/JSONL shards. This is a fallback/debug mode, not the recommended training path for Llama 3, because tokenizer CPU work can starve the GPU.
 
 If you want lower RAM and a local disk cache instead of live streaming, materialize bounded raw Arrow files first:
 
@@ -492,7 +492,7 @@ PYTHONPATH=src python -m crest.cli_train_variant \
   --raw-text
 ```
 
-`--raw-text` changes the loaded data task to `raw_text` and reads local `train.arrow` / `eval.arrow` files directly. `--raw-chunk-tokens` controls how aggressively long documents are split before writing; the default is one CREST episode worth of tokens.
+`--raw-text` changes the loaded data task to `raw_text` and reads local `train.arrow` / `eval.arrow` files directly. `--raw-chunk-tokens` controls how aggressively long documents are split before writing; the default is one CREST episode worth of tokens. This still tokenizes during training, so use it only when pretokenized Arrow episodes are not practical.
 
 If the raw cache was produced as JSONL instead, use the second-class JSONL option:
 
@@ -506,7 +506,7 @@ PYTHONPATH=src python -m crest.cli_train_variant \
   --raw-path data/raw_text/default
 ```
 
-`--raw-jsonl` reads local `train.jsonl` / `eval.jsonl` files and tokenizes them online. `--raw-path` can point at the raw cache directory or at a single split file. Use exactly one of `--streaming`, `--raw-text`, or `--raw-jsonl`.
+`--raw-jsonl` reads local `train.jsonl` / `eval.jsonl` files and tokenizes them online. `--raw-path` can point at the raw cache directory or at a single split file. This is the slowest Llama 3 path and exists for compatibility only. Use exactly one of `--streaming`, `--raw-text`, or `--raw-jsonl`.
 
 No-state comparison:
 
@@ -515,8 +515,7 @@ PYTHONPATH=src python -m crest.cli_train_variant \
   --model src/configs/models/default.yaml \
   --data src/configs/data_manifests/default.yaml \
   --training src/configs/training/default.yaml \
-  --variant no_state \
-  --streaming
+  --variant no_state
 ```
 
 If Llama tokenizer access fails, use `gpt2` as an open fallback, but then use a GPT-2 vocab-sized model config.
@@ -586,8 +585,8 @@ first real dataset: FineWeb-Edu sample-10BT
 Run order:
 
 ```text
-1. Train default M16 with `--streaming` for immediate runs, or prepare Arrow shards when you want deterministic reusable data.
-2. Train default M16.
+1. Prepare pretokenized Arrow episodes with `cli_prepare_manifest.py`.
+2. Train default M16 from the manifest with no raw/streaming flags.
 3. Run no_state comparison.
 4. Run synthetic medium multi-hop regression occasionally.
 5. Only scale after CREST beats no_state on real text.

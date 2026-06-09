@@ -276,6 +276,13 @@ class StreamingTextDataset(IterableDataset[Episode]):
         self.pad_token_id = int(tokenizer_meta(self.tokenizer)["pad_token_id"])
 
     def __iter__(self) -> Iterator[Episode]:
+        # Shard documents across DataLoader workers so each worker tokenizes only
+        # its own slice. Without this, num_workers copies of the tokenizer each
+        # process every document, multiplying CPU overhead by num_workers.
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        num_workers = worker_info.num_workers if worker_info is not None else 1
+
         window = self.cfg.episode_steps * self.cfg.step_length + 1
         stride = int(self.cfg.metadata.get("stride_tokens", self.cfg.episode_steps * self.cfg.step_length))
         for item in self.items:
@@ -286,16 +293,22 @@ class StreamingTextDataset(IterableDataset[Episode]):
             ds = load_hf_dataset(stream_item)
             text_field = stream_item.get("text_field", "text")
             max_documents = stream_item.get("max_documents")
+            doc_idx = 0
             docs = 0
             for row in ds:
                 text = row.get(text_field)
                 if not text:
                     continue
+                # Each worker takes every num_workers-th document starting at worker_id.
+                if doc_idx % num_workers != worker_id:
+                    doc_idx += 1
+                    continue
+                doc_idx += 1
                 docs += 1
                 ids = encode_text(self.tokenizer, str(text))
                 for chunk in iter_windows(ids, window, stride, self.pad_token_id):
                     yield episode_row_to_tensors(self._episode_from_window(chunk), self.cfg)
-                if max_documents is not None and docs >= int(max_documents):
+                if max_documents is not None and docs >= int(max_documents // max(1, num_workers)):
                     break
 
     def _episode_from_window(self, tokens: list[int]) -> dict:
@@ -315,7 +328,14 @@ class StreamingTextDataset(IterableDataset[Episode]):
 
 
 class RawTextDataset(IterableDataset[Episode]):
-    """Tokenize bounded local raw Arrow or JSONL files during training."""
+    """Tokenize bounded local raw Arrow or JSONL files during training.
+
+    Worker splitting: when used with DataLoader num_workers > 0, each worker
+    processes every num_workers-th document (round-robin by document index).
+    This eliminates duplicate tokenization — without get_worker_info() sharding
+    all workers iterate the entire file and tokenize every document independently,
+    multiplying tokenizer CPU cost by num_workers.
+    """
 
     def __init__(self, cfg: DataConfig, split: str = "train", file_format: str = "arrow") -> None:
         if cfg.path is None:
@@ -342,10 +362,21 @@ class RawTextDataset(IterableDataset[Episode]):
             return
         yield from self._iter_arrow()
 
+    def _worker_slice(self) -> tuple[int, int]:
+        """Return (worker_id, num_workers) for round-robin document sharding."""
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            return 0, 1
+        return worker_info.id, worker_info.num_workers
+
     def _iter_jsonl(self) -> Iterator[Episode]:
+        # Each DataLoader worker owns every num_workers-th document starting at
+        # worker_id. This prevents each worker from re-tokenizing the entire file.
+        worker_id, num_workers = self._worker_slice()
         window = self.cfg.episode_steps * self.cfg.step_length + 1
         stride = int(self.cfg.metadata.get("stride_tokens", self.cfg.episode_steps * self.cfg.step_length))
         with self.path.open("r", encoding="utf-8", errors="ignore") as f:
+            doc_idx = 0
             for line in f:
                 if not line.strip():
                     continue
@@ -353,15 +384,18 @@ class RawTextDataset(IterableDataset[Episode]):
                 text = row.get(self.text_field)
                 if not text:
                     continue
-                ids = encode_text(self.tokenizer, str(text))
-                for chunk in iter_windows(ids, window, stride, self.pad_token_id):
-                    yield episode_row_to_tensors(self._episode_from_window(chunk), self.cfg)
+                if doc_idx % num_workers == worker_id:
+                    ids = encode_text(self.tokenizer, str(text))
+                    for chunk in iter_windows(ids, window, stride, self.pad_token_id):
+                        yield episode_row_to_tensors(self._episode_from_window(chunk), self.cfg)
+                doc_idx += 1
 
     def _iter_arrow(self) -> Iterator[Episode]:
         try:
             import pyarrow as pa
         except ImportError as exc:
             raise RuntimeError("Raw Arrow training requires `pip install pyarrow`.") from exc
+        worker_id, num_workers = self._worker_slice()
         window = self.cfg.episode_steps * self.cfg.step_length + 1
         stride = int(self.cfg.metadata.get("stride_tokens", self.cfg.episode_steps * self.cfg.step_length))
         with pa.memory_map(str(self.path), "r") as source:
@@ -369,14 +403,17 @@ class RawTextDataset(IterableDataset[Episode]):
             text_col = reader.schema.get_field_index(self.text_field)
             if text_col < 0:
                 raise ValueError(f"Raw Arrow file '{self.path}' has no column {self.text_field!r}")
+            doc_idx = 0
             for batch_idx in range(reader.num_record_batches):
                 batch = reader.get_batch(batch_idx)
                 for text in batch.column(text_col).to_pylist():
                     if not text:
                         continue
-                    ids = encode_text(self.tokenizer, str(text))
-                    for chunk in iter_windows(ids, window, stride, self.pad_token_id):
-                        yield episode_row_to_tensors(self._episode_from_window(chunk), self.cfg)
+                    if doc_idx % num_workers == worker_id:
+                        ids = encode_text(self.tokenizer, str(text))
+                        for chunk in iter_windows(ids, window, stride, self.pad_token_id):
+                            yield episode_row_to_tensors(self._episode_from_window(chunk), self.cfg)
+                    doc_idx += 1
 
     def _episode_from_window(self, tokens: list[int]) -> dict:
         needed = self.cfg.episode_steps * self.cfg.step_length

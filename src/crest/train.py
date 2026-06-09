@@ -144,12 +144,31 @@ def run_training(
     if logger:
         logger.log(start_step, {"event": "startup", **report})
     if distributed.is_main:
+        micro_bs = train_cfg.micro_batch_size or train_cfg.batch_size
+        fwd_calls_per_step = math.ceil(train_cfg.batch_size / max(1, micro_bs)) * math.ceil(data_cfg.episode_steps / max(1, train_cfg.tbptt_k)) * train_cfg.tbptt_k
         print(
             f"[startup] run={train_cfg.run_name} device={device} precision={train_cfg.precision} "
             f"params={report['parameters']:,} train_episodes={len(train_ds) if not train_is_stream else 'streaming'} eval_episodes={len(eval_ds) if not eval_is_stream else 'streaming'} "
-            f"batch_size={train_cfg.batch_size} micro_batch_size={train_cfg.micro_batch_size or train_cfg.batch_size} max_steps={train_cfg.max_steps} output_dir={train_cfg.output_dir}",
+            f"batch_size={train_cfg.batch_size} micro_batch_size={micro_bs} max_steps={train_cfg.max_steps} output_dir={train_cfg.output_dir} "
+            f"fwd_calls_per_optimizer_step={fwd_calls_per_step}",
             flush=True,
         )
+        # Bug 3 guard: with small micro_batch_size, CUDA kernel-launch latency
+        # dominates compute. Each optimizer step fires
+        #   ceil(batch_size / micro_batch_size) × ceil(episode_steps / tbptt_k) × tbptt_k
+        # forward passes. At micro_batch_size ≤ 4 on CUDA this is typically
+        # 3–8% peak TFLOPS. Raise micro_batch_size (check logit memory:
+        #   micro_batch_size × step_length × vocab_size × 2 bytes) to recover utilization.
+        if device.type == "cuda" and micro_bs <= 4:
+            print(
+                f"[WARNING] micro_batch_size={micro_bs} is very small on CUDA "
+                f"({fwd_calls_per_step} forward calls/step). GPU utilization will be dominated "
+                f"by kernel-launch overhead (~3-8% peak TFLOPS). "
+                f"Consider raising micro_batch_size to 16 or 32 if VRAM allows "
+                f"(logit mem ≈ {micro_bs * data_cfg.step_length * model_cfg.vocab_size * 2 / 1e6:.0f} MB → "
+                f"{32 * data_cfg.step_length * model_cfg.vocab_size * 2 / 1e6:.0f} MB at micro_batch_size=32).",
+                flush=True,
+            )
 
     scaler = make_grad_scaler(train_cfg.precision, device)
     step = start_step
