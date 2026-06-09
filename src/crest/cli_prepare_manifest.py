@@ -128,17 +128,16 @@ def prepare_manifest(args, items: list[dict], tokenizer) -> dict:
             text = row.get(text_field)
             if not text:
                 continue
-            ids = encode_text(tokenizer, str(text))
-            if max_tokens is not None and source_tokens >= int(max_tokens):
-                break
-            remaining_source = None if max_tokens is None else max(0, int(max_tokens) - source_tokens)
+            # --- Early exit: check global and source token caps BEFORE tokenizing.
+            # This avoids one wasted encode_text call per source once the cap is hit.
             remaining_global = None if args.max_tokens is None else max(0, int(args.max_tokens) - total_tokens)
+            remaining_source = None if max_tokens is None else max(0, int(max_tokens) - source_tokens)
             remaining_limits = [x for x in [remaining_source, remaining_global] if x is not None]
+            if remaining_limits and min(remaining_limits) <= 0:
+                break
+            ids = encode_text(tokenizer, str(text))
             if remaining_limits:
-                remaining = min(remaining_limits)
-                if remaining <= 0:
-                    break
-                ids = ids[:remaining]
+                ids = ids[:min(remaining_limits)]
             source_tokens += len(ids)
             total_tokens += len(ids)
             source_docs += 1
@@ -151,6 +150,13 @@ def prepare_manifest(args, items: list[dict], tokenizer) -> dict:
                 split_counts[split] += 1
                 total_episodes += 1
                 source_episodes += 1
+            # Progress heartbeat: print every 1000 docs so the operator knows it's running.
+            if source_docs % 1000 == 0:
+                print(
+                    f"[prepare_manifest] ... docs={source_docs} source_tokens={source_tokens:,} "
+                    f"total_tokens={total_tokens:,} episodes={total_episodes:,}",
+                    flush=True,
+                )
             if args.max_episodes is not None and total_episodes >= args.max_episodes:
                 break
             if max_documents is not None and source_docs >= int(max_documents):

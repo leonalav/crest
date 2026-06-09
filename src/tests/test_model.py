@@ -23,10 +23,12 @@ def test_state_shape_stable_across_steps():
 def test_zero_state_produces_zero_state_read_output_path():
     cfg = tiny_cfg()
     model = CRESTModel(cfg)
+    model.set_diagnostics_enabled(True)
     x = torch.randn(2, 4, cfg.d_model)
     s = torch.zeros(2, cfg.memory_slots, cfg.d_model)
     y, probs = model.layers[0].state_read(model.layers[0].x_norm1(x), model.layers[0].s_norm(s))
     assert torch.allclose(y, torch.zeros_like(y), atol=1e-6)
+    assert probs is not None
     assert torch.allclose(probs.sum(dim=-1), torch.ones_like(probs.sum(dim=-1)), atol=1e-6)
 
 

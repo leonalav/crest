@@ -3,12 +3,11 @@ datasets:
     subset: sample-10BT
     split: train
     text_field: text
-    max_documents: 500000000
-    streaming: false
+    streaming: true
   - repo: tokyotech-llm/swallow-math
     split: train
     text_field: text
-    streaming: false
+    streaming: true
   - repo: codeparrot/github-code-clean
     split: train
     text_field: code

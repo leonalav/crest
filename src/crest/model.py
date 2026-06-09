@@ -31,8 +31,15 @@ class CRESTModel(nn.Module):
         self.layers = nn.ModuleList([CRESTLayer(cfg) for _ in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.d_model, cfg.rms_norm_eps)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+        self._diagnostics_enabled = bool(cfg.compute_attention_diagnostics)
+        self.set_diagnostics_enabled(self._diagnostics_enabled)
         if cfg.tie_embeddings:
             self.lm_head.weight = self.token_embedding.weight
+
+    def set_diagnostics_enabled(self, enabled: bool) -> None:
+        self._diagnostics_enabled = enabled
+        for layer in self.layers:
+            layer._propagate_diagnostics(enabled)
 
     def init_state(self, batch_size: int, *, device: torch.device | None = None, dtype: torch.dtype | None = None) -> list[torch.Tensor]:
         return init_state(self.cfg.n_layers, batch_size, self.cfg.memory_slots, self.cfg.d_model, device=device, dtype=dtype)

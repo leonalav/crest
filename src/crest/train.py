@@ -63,13 +63,14 @@ def train_episode_batch(model: CRESTModel, batch, optimizer: AdamW, cfg: Trainin
     chunks = 0
     for start in range(0, t, cfg.tbptt_k):
         chunk_loss = None
+        denom = min(cfg.tbptt_k, t - start)
         for offset in range(start, min(t, start + cfg.tbptt_k)):
             logits, state, aux = model(batch.input_ids[:, offset], state=state, step_idx=batch.step_idx[:, offset])
             loss = lm_loss(logits, batch.labels[:, offset]) + gate_target_loss(aux, cfg.gate_regularization_weight, cfg.gate_target)
             chunk_loss = loss if chunk_loss is None else chunk_loss + loss
             last_aux = aux
         assert chunk_loss is not None
-        (chunk_loss / cfg.tbptt_k).backward()
+        (chunk_loss / denom).backward()
         state = detach_state(state)
         total_loss = chunk_loss.detach() if total_loss is None else total_loss + chunk_loss.detach()
         chunks += 1
@@ -187,6 +188,11 @@ def run_training(
         set_lr(optimizer, lr)
         model.train()
         optimizer.zero_grad(set_to_none=True)
+        # Enable attention diagnostics on logging steps so that entropy
+        # metrics are available during training. Other steps use fast SDPA.
+        diag_this_step = step % train_cfg.log_every == 0
+        if diag_this_step:
+            crest_model.set_diagnostics_enabled(True)
         b, t, _ = batch.input_ids.shape
         micro_batch_size = train_cfg.micro_batch_size or b
         micro_batches = max(1, math.ceil(b / micro_batch_size))
@@ -217,15 +223,28 @@ def run_training(
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
+        if diag_this_step:
+            crest_model.set_diagnostics_enabled(False)
 
         if step % train_cfg.log_every == 0:
-            train_metrics = {"event": "train", "loss": float(total_loss.item() / max(1, t * micro_batches)), "loss_sum": float(total_loss.item()), "lr": lr, "grad_norm": float(grad_norm), "gate_mean": float(last_aux.gate_mean.item()) if last_aux else 0.0}
+            train_metrics = {
+                "event": "train",
+                "loss": float(total_loss.item() / max(1, t * micro_batches)),
+                "loss_sum": float(total_loss.item()),
+                "lr": lr,
+                "grad_norm": float(grad_norm),
+                "gate_mean": float(last_aux.gate_mean.item()) if last_aux else 0.0,
+                "state_read_entropy": float(last_aux.state_read_entropy.item()) if last_aux else 0.0,
+                "write_entropy": float(last_aux.write_entropy.item()) if last_aux else 0.0,
+            }
             if logger:
                 logger.log(step, train_metrics)
             if distributed.is_main:
                 print(
                     f"[train] step={step}/{train_cfg.max_steps} loss={train_metrics['loss']:.4f} "
-                    f"lr={lr:.3e} grad_norm={train_metrics['grad_norm']:.3f} gate_mean={train_metrics['gate_mean']:.3f}",
+                    f"lr={lr:.3e} grad_norm={train_metrics['grad_norm']:.3f} "
+                    f"gate_mean={train_metrics['gate_mean']:.3f} "
+                    f"read_H={train_metrics['state_read_entropy']:.3f} write_H={train_metrics['write_entropy']:.3f}",
                     flush=True,
                 )
         if step > 0 and step % train_cfg.eval_every == 0:

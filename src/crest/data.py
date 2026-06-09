@@ -103,33 +103,44 @@ class SyntheticMultiHopDataset(SyntheticKeyValueDataset):
 
 
 class SyntheticExactTwoHopDataset(SyntheticKeyValueDataset):
-    """Synthetic curriculum where every query has an exact two-hop answer."""
+    """Synthetic curriculum where every query has an exact two-hop answer.
+
+    A chain (a -> b -> c) becomes queryable only after both visible write steps
+    have appeared in the episode. Query targets are revalidated against the
+    current edge table, so overwritten edges cannot leave stale labels behind.
+    """
 
     LINK = 4
 
     def __getitem__(self, index: int) -> Episode:
         rng = random.Random(self.cfg.seed + index)
+        pending: list[tuple[int, int, int]] = []
         chains: list[tuple[int, int, int]] = []
         edges: dict[int, int] = {}
         steps: list[list[int]] = []
         labels: list[list[int]] = []
         for _ in range(self.cfg.episode_steps):
-            do_query = bool(chains) and rng.random() < self.cfg.query_probability
+            valid_chains = [(a, b, c) for (a, b, c) in chains if edges.get(a) == b and edges.get(b) == c]
+            do_query = bool(valid_chains) and rng.random() < self.cfg.query_probability
             if do_query:
-                a, _, c = rng.choice(chains)
+                a, _, c = rng.choice(valid_chains)
                 toks = [self.QUERY, self.key_offset + a, self.LINK, self.ANSWER]
                 labs = [-100, -100, -100, self.value_offset + c % self.cfg.num_values]
             else:
-                a = rng.randrange(self.cfg.num_keys)
-                b = rng.randrange(self.cfg.num_keys)
-                c = rng.randrange(self.cfg.num_keys)
-                edges[a] = b
-                edges[b] = c
-                chains.append((a, b, c))
-                if rng.random() < 0.5:
-                    toks = [self.WRITE, self.key_offset + a, self.LINK, self.key_offset + b]
-                else:
+                complete_pending = bool(pending) and (bool(chains) or rng.random() < 0.65)
+                if complete_pending:
+                    chain_idx = rng.randrange(len(pending))
+                    a, b, c = pending.pop(chain_idx)
+                    edges[b] = c
+                    chains.append((a, b, c))
                     toks = [self.WRITE, self.key_offset + b, self.LINK, self.key_offset + c]
+                else:
+                    a = rng.randrange(self.cfg.num_keys)
+                    b = rng.randrange(self.cfg.num_keys)
+                    c = rng.randrange(self.cfg.num_keys)
+                    edges[a] = b
+                    pending.append((a, b, c))
+                    toks = [self.WRITE, self.key_offset + a, self.LINK, self.key_offset + b]
                 labs = [-100, -100, -100, -100]
             steps.append(toks[: self.cfg.step_length] + [self.PAD] * max(0, self.cfg.step_length - len(toks)))
             labels.append(labs[: self.cfg.step_length] + [-100] * max(0, self.cfg.step_length - len(labs)))

@@ -24,6 +24,7 @@ class CRESTConfig:
     use_state_write: bool = True
     use_local_rope: bool = True
     attention_backend: str = "auto"
+    compute_attention_diagnostics: bool = False
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads != 0:
