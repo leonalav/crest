@@ -128,7 +128,8 @@ def run_training(
     crest_model = CRESTModel(model_cfg).to(device)
     model: torch.nn.Module = crest_model
     if train_cfg.compile_model and hasattr(torch, "compile"):
-        model = torch.compile(model, mode="reduce-overhead")
+        mode = None if train_cfg.compile_mode == "default" else train_cfg.compile_mode
+        model = torch.compile(model, mode=mode, dynamic=True)
     if distributed.enabled:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[distributed.local_rank] if device.type == "cuda" else None)
     aux_head = StateReconstructionHead(model_cfg.d_model, train_cfg.aux_state_dim).to(device) if train_cfg.aux_state_weight > 0 else None

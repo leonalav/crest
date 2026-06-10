@@ -67,6 +67,7 @@ class TrainingConfig:
     prefetch_factor: int = 2
     use_fsdp: bool = False
     compile_model: bool = False
+    compile_mode: str = "default"
     fused_optimizer: bool = True
     aux_state_weight: float = 0.0
     aux_state_dim: int = 128

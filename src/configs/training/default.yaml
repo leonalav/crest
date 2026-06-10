@@ -18,7 +18,7 @@ pin_memory: true
 persistent_workers: true
 prefetch_factor: 4
 fused_optimizer: true
-compile_model: true
+compile_model: false
 log_every: 100
 eval_every: 300
 save_every: 500
