@@ -62,7 +62,12 @@ class TrainingConfig:
     save_every: int = 500
     resume_from: str | None = None
     num_workers: int = 0
+    pin_memory: bool = True
+    persistent_workers: bool = True
+    prefetch_factor: int = 2
     use_fsdp: bool = False
+    compile_model: bool = False
+    fused_optimizer: bool = True
     aux_state_weight: float = 0.0
     aux_state_dim: int = 128
     ce_chunk_size: int = 256

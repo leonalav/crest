@@ -11,9 +11,14 @@ grad_clip_norm: 1.0
 gate_regularization_weight: 0.0
 gate_target: 0.5
 precision: bf16
-ce_chunk_size: 256
+ce_chunk_size: 512
 seed: 1337
-num_workers: 2
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 4
+fused_optimizer: true
+compile_model: true
 log_every: 100
 eval_every: 300
 save_every: 500

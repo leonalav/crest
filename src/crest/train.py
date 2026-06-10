@@ -43,7 +43,20 @@ def build_optimizer(model: CRESTModel, cfg: TrainingConfig) -> AdamW:
             no_decay.append(param)
         else:
             decay.append(param)
-    return AdamW([{"params": decay, "weight_decay": cfg.weight_decay}, {"params": no_decay, "weight_decay": 0.0}], lr=cfg.learning_rate)
+    kwargs: dict[str, Any] = {}
+    if cfg.fused_optimizer and torch.cuda.is_available():
+        kwargs["fused"] = True
+    return AdamW([{"params": decay, "weight_decay": cfg.weight_decay}, {"params": no_decay, "weight_decay": 0.0}], lr=cfg.learning_rate, **kwargs)
+
+
+def dataloader_kwargs(train_cfg: TrainingConfig, device: torch.device) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"num_workers": train_cfg.num_workers}
+    if device.type == "cuda" and train_cfg.pin_memory:
+        kwargs["pin_memory"] = True
+    if train_cfg.num_workers > 0:
+        kwargs["persistent_workers"] = train_cfg.persistent_workers
+        kwargs["prefetch_factor"] = max(1, train_cfg.prefetch_factor)
+    return kwargs
 
 
 def cosine_warmup_lr(step: int, cfg: TrainingConfig) -> float:
@@ -112,10 +125,12 @@ def run_training(
     output_dir = Path(train_cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = CRESTModel(model_cfg).to(device)
+    crest_model = CRESTModel(model_cfg).to(device)
+    model: torch.nn.Module = crest_model
+    if train_cfg.compile_model and hasattr(torch, "compile"):
+        model = torch.compile(model, mode="reduce-overhead")
     if distributed.enabled:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[distributed.local_rank] if device.type == "cuda" else None)
-    crest_model = unwrap_model(model)
     aux_head = StateReconstructionHead(model_cfg.d_model, train_cfg.aux_state_dim).to(device) if train_cfg.aux_state_weight > 0 else None
     if aux_head is not None:
         crest_model.aux_state_head = aux_head
@@ -130,8 +145,9 @@ def run_training(
     eval_is_stream = isinstance(eval_ds, IterableDataset)
     train_sampler = DistributedSampler(train_ds, num_replicas=distributed.world_size, rank=distributed.rank, shuffle=True) if distributed.enabled and not train_is_stream else None
     eval_sampler = DistributedSampler(eval_ds, num_replicas=distributed.world_size, rank=distributed.rank, shuffle=False) if distributed.enabled and not eval_is_stream else None
-    train_loader = DataLoader(train_ds, batch_size=train_cfg.batch_size, shuffle=(train_sampler is None and not train_is_stream), sampler=train_sampler, num_workers=train_cfg.num_workers, collate_fn=collate_episodes, drop_last=True)
-    eval_loader = DataLoader(eval_ds, batch_size=train_cfg.batch_size, shuffle=False, sampler=eval_sampler, num_workers=train_cfg.num_workers, collate_fn=collate_episodes)
+    loader_kwargs = dataloader_kwargs(train_cfg, device)
+    train_loader = DataLoader(train_ds, batch_size=train_cfg.batch_size, shuffle=(train_sampler is None and not train_is_stream), sampler=train_sampler, collate_fn=collate_episodes, drop_last=True, **loader_kwargs)
+    eval_loader = DataLoader(eval_ds, batch_size=train_cfg.batch_size, shuffle=False, sampler=eval_sampler, collate_fn=collate_episodes, **loader_kwargs)
 
     logger = JsonlLogger(train_cfg.output_dir, train_cfg.run_name) if distributed.is_main else None
     report = {
@@ -200,9 +216,10 @@ def run_training(
         last_aux = None
         for mb_start in range(0, b, micro_batch_size):
             mb_end = min(b, mb_start + micro_batch_size)
-            input_ids = batch.input_ids[mb_start:mb_end].to(device)
-            labels = batch.labels[mb_start:mb_end].to(device)
-            step_idx = batch.step_idx[mb_start:mb_end].to(device)
+            non_blocking = device.type == "cuda" and train_cfg.pin_memory
+            input_ids = batch.input_ids[mb_start:mb_end].to(device, non_blocking=non_blocking)
+            labels = batch.labels[mb_start:mb_end].to(device, non_blocking=non_blocking)
+            step_idx = batch.step_idx[mb_start:mb_end].to(device, non_blocking=non_blocking)
             state = crest_model.init_state(input_ids.size(0), device=device, dtype=next(model.parameters()).dtype)
             with autocast_context(train_cfg.precision, device):
                 for start in range(0, t, train_cfg.tbptt_k):
