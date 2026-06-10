@@ -1,5 +1,6 @@
 model: research_125m
 batch_size: 8
+micro_batch_size: 64
 max_steps: 100000
 tbptt_k: 16
 learning_rate: 0.0002
@@ -21,3 +22,4 @@ num_workers: 4
 use_fsdp: false
 aux_state_weight: 0.0
 aux_state_dim: 256
+ce_chunk_size: 256

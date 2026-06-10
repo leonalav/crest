@@ -17,7 +17,7 @@ from .data import build_dataset, collate_episodes
 from .distributed import DistributedInfo
 from .eval import evaluate
 from .logging_utils import JsonlLogger
-from .losses import gate_target_loss, lm_loss
+from .losses import gate_target_loss
 from .metrics import component_parameter_counts, count_parameters, estimate_episode_flops
 from .model import CRESTModel
 from .precision import autocast_context, make_grad_scaler
@@ -65,8 +65,8 @@ def train_episode_batch(model: CRESTModel, batch, optimizer: AdamW, cfg: Trainin
         chunk_loss = None
         denom = min(cfg.tbptt_k, t - start)
         for offset in range(start, min(t, start + cfg.tbptt_k)):
-            logits, state, aux = model(batch.input_ids[:, offset], state=state, step_idx=batch.step_idx[:, offset])
-            loss = lm_loss(logits, batch.labels[:, offset]) + gate_target_loss(aux, cfg.gate_regularization_weight, cfg.gate_target)
+            loss, state, aux = model.forward_loss(batch.input_ids[:, offset], batch.labels[:, offset], state=state, step_idx=batch.step_idx[:, offset], ce_chunk_size=cfg.ce_chunk_size)
+            loss = loss + gate_target_loss(aux, cfg.gate_regularization_weight, cfg.gate_target)
             chunk_loss = loss if chunk_loss is None else chunk_loss + loss
             last_aux = aux
         assert chunk_loss is not None
@@ -209,8 +209,8 @@ def run_training(
                     chunk_loss = None
                     denom = min(train_cfg.tbptt_k, t - start)
                     for offset in range(start, start + denom):
-                        logits, state, aux = model(input_ids[:, offset], state=state, step_idx=step_idx[:, offset])
-                        loss = lm_loss(logits, labels[:, offset]) + gate_target_loss(aux, train_cfg.gate_regularization_weight, train_cfg.gate_target)
+                        loss, state, aux = model(input_ids[:, offset], state=state, step_idx=step_idx[:, offset], labels=labels[:, offset], ce_chunk_size=train_cfg.ce_chunk_size)
+                        loss = loss + gate_target_loss(aux, train_cfg.gate_regularization_weight, train_cfg.gate_target)
                         if aux_head is not None:
                             loss = loss + train_cfg.aux_state_weight * aux_head(aux.final_state[-1], aux.hidden)
                         chunk_loss = loss if chunk_loss is None else chunk_loss + loss

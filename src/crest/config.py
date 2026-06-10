@@ -43,7 +43,7 @@ class CRESTConfig:
 class TrainingConfig:
     model: str = "debug"
     batch_size: int = 8
-    micro_batch_size: int = 0
+    micro_batch_size: int = 64
     max_steps: int = 1000
     tbptt_k: int = 8
     learning_rate: float = 3e-4
@@ -53,7 +53,7 @@ class TrainingConfig:
     grad_clip_norm: float = 1.0
     gate_regularization_weight: float = 0.0
     gate_target: float = 0.5
-    precision: str = "fp32"
+    precision: str = "bf16"
     seed: int = 1337
     output_dir: str = "runs/debug"
     run_name: str = "crest_debug"
@@ -65,6 +65,7 @@ class TrainingConfig:
     use_fsdp: bool = False
     aux_state_weight: float = 0.0
     aux_state_dim: int = 128
+    ce_chunk_size: int = 256
 
 
 @dataclass(frozen=True)

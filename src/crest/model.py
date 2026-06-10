@@ -7,6 +7,7 @@ from torch import nn
 
 from .config import CRESTConfig
 from .layers import CRESTLayer, RMSNorm
+from .losses import chunked_lm_head_loss
 from .state import init_state
 
 
@@ -44,7 +45,14 @@ class CRESTModel(nn.Module):
     def init_state(self, batch_size: int, *, device: torch.device | None = None, dtype: torch.dtype | None = None) -> list[torch.Tensor]:
         return init_state(self.cfg.n_layers, batch_size, self.cfg.memory_slots, self.cfg.d_model, device=device, dtype=dtype)
 
-    def forward(self, input_ids: torch.Tensor, state: list[torch.Tensor] | None = None, step_idx: torch.Tensor | int = 0, labels: torch.Tensor | None = None) -> tuple[torch.Tensor, list[torch.Tensor], CRESTAux]:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        state: list[torch.Tensor] | None = None,
+        step_idx: torch.Tensor | int = 0,
+        labels: torch.Tensor | None = None,
+        ce_chunk_size: int = 0,
+    ) -> tuple[torch.Tensor, list[torch.Tensor], CRESTAux]:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [B, L]")
         b = input_ids.size(0)
@@ -70,8 +78,22 @@ class CRESTModel(nn.Module):
             read_entropies.append(aux.state_read_entropy)
             write_entropies.append(aux.write_entropy)
         hidden = self.norm(x)
+        if labels is not None:
+            loss = chunked_lm_head_loss(hidden, labels, self.lm_head, chunk_size=ce_chunk_size)
+            return loss, next_state, CRESTAux(gates=gates, state_read_entropy=torch.stack(read_entropies).mean(), write_entropy=torch.stack(write_entropies).mean(), hidden=hidden, final_state=next_state)
         logits = self.lm_head(hidden)
         return logits, next_state, CRESTAux(gates=gates, state_read_entropy=torch.stack(read_entropies).mean(), write_entropy=torch.stack(write_entropies).mean(), hidden=hidden, final_state=next_state)
+
+    def forward_loss(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor,
+        state: list[torch.Tensor] | None = None,
+        step_idx: torch.Tensor | int = 0,
+        *,
+        ce_chunk_size: int = 0,
+    ) -> tuple[torch.Tensor, list[torch.Tensor], CRESTAux]:
+        return self(input_ids, state=state, step_idx=step_idx, labels=labels, ce_chunk_size=ce_chunk_size)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())

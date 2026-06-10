@@ -1,6 +1,6 @@
 model: default
 batch_size: 64
-micro_batch_size: 4
+micro_batch_size: 64
 max_steps: 2500
 tbptt_k: 8
 learning_rate: 0.00022
@@ -10,7 +10,8 @@ weight_decay: 0.1
 grad_clip_norm: 1.0
 gate_regularization_weight: 0.0
 gate_target: 0.5
-precision: fp16
+precision: bf16
+ce_chunk_size: 256
 seed: 1337
 num_workers: 2
 log_every: 100

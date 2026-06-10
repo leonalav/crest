@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 
 from crest.config import CRESTConfig, DataConfig, TrainingConfig
 from crest.data import SyntheticKeyValueDataset, collate_episodes
-from crest.losses import dpo_loss, lm_loss
+from crest.losses import chunked_lm_head_loss, dpo_loss, lm_loss
 from crest.model import CRESTModel
 from crest.train import build_optimizer, train_episode_batch
 
@@ -31,6 +31,21 @@ def test_lm_loss_empty_supervision_is_zero_not_nan():
     loss.backward()
     assert torch.isfinite(loss)
     assert loss.item() == 0.0
+
+
+def test_chunked_lm_head_loss_matches_full_ce():
+    torch.manual_seed(0)
+    hidden = torch.randn(3, 4, 7, requires_grad=True)
+    labels = torch.tensor([[1, -100, 3, 4], [4, 5, 6, 7], [8, 9, -100, 10]])
+    lm_head = torch.nn.Linear(7, 11, bias=False)
+
+    full_loss = lm_loss(lm_head(hidden), labels)
+    chunked_loss = chunked_lm_head_loss(hidden, labels, lm_head, chunk_size=3)
+
+    assert torch.allclose(chunked_loss, full_loss)
+    chunked_loss.backward()
+    assert hidden.grad is not None
+    assert lm_head.weight.grad is not None
 
 
 def test_dpo_loss_prefers_higher_policy_ratio():
