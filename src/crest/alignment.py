@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import torch
-from torch.nn import functional as F
 
-from .losses import dpo_loss, lm_loss
+from .losses import dpo_loss
 from .model import CRESTModel
 
 
@@ -13,17 +12,20 @@ def trajectory_logprob(model: CRESTModel, input_ids: torch.Tensor, labels: torch
     Citation: DPO, arXiv:2305.18290, optimizes log-probability ratios. CREST
     extension required for recurrent models: policy and reference must roll their own states
     on identical prefixes; this helper enforces that separation by taking one model.
+
+    Head-agnostic: head_target_log_prob returns exact log p(label | h) for both
+    the full and adaptive heads (the adaptive factorization is exactly
+    normalized, so these log-probs are true likelihoods, not approximations),
+    and is exactly 0.0 at ignored positions, so the plain sum over the step is
+    the masked sum.
     """
     b = input_ids.size(0)
     state = model.init_state(b, device=input_ids.device, dtype=next(model.parameters()).dtype)
     totals = torch.zeros(b, device=input_ids.device)
     for t in range(input_ids.size(1)):
-        logits, state, _ = model(input_ids[:, t], state=state, step_idx=step_idx[:, t])
-        log_probs = F.log_softmax(logits, dim=-1)
-        valid = labels[:, t] != -100
-        safe_labels = labels[:, t].clamp_min(0)
-        token_lp = log_probs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
-        totals = totals + (token_lp * valid).sum(dim=-1)
+        _, state, aux = model(input_ids[:, t], state=state, step_idx=step_idx[:, t], return_logits=False)
+        token_lp = model.head_target_log_prob(aux.hidden, labels[:, t])
+        totals = totals + token_lp.sum(dim=-1)
     return totals
 
 
@@ -32,8 +34,7 @@ def sft_loss_for_batch(model: CRESTModel, batch) -> torch.Tensor:
     state = model.init_state(b, device=batch.input_ids.device, dtype=next(model.parameters()).dtype)
     total = None
     for t in range(batch.input_ids.size(1)):
-        logits, state, _ = model(batch.input_ids[:, t], state=state, step_idx=batch.step_idx[:, t])
-        loss = lm_loss(logits, batch.labels[:, t])
+        loss, state, _ = model(batch.input_ids[:, t], state=state, step_idx=batch.step_idx[:, t], labels=batch.labels[:, t])
         total = loss if total is None else total + loss
     assert total is not None
     return total / batch.input_ids.size(1)

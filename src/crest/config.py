@@ -25,6 +25,24 @@ class CRESTConfig:
     use_local_rope: bool = True
     attention_backend: str = "auto"
     compute_attention_diagnostics: bool = False
+    # --- Output head factorization ---
+    # "full": dense Linear(d_model, vocab_size); exact softmax, O(V*d) per token.
+    # "adaptive": cluster-factored exact softmax (Grave et al., arXiv:1609.04309)
+    #   via nn.AdaptiveLogSoftmaxWithLoss. Expected cost per supervised token:
+    #     2*d*(cutoffs[0] + n_clusters) + sum_i p_i * (2*d*d_i + 2*d_i*|V_i|),
+    #   where d_i = d_model // div_value**(i+1). Requires frequency-ordered
+    #   token IDs: provide token_perm_path produced by crest.cli_vocab_freq.
+    head_type: str = "full"
+    adaptive_cutoffs: tuple = ()
+    adaptive_div_value: float = 4.0
+    adaptive_head_bias: bool = False
+    # Optional measured tail-cluster target probabilities (one per cluster,
+    # excluding the head). Used only for FLOP reporting in metrics.py.
+    adaptive_cluster_probs: tuple | None = None
+    # Path to torch.save'd dict with "perm" (original id -> frequency rank)
+    # produced by `python -m crest.cli_vocab_freq`. The tokenizer itself is
+    # never modified; this is an internal bijective relabeling.
+    token_perm_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads != 0:
@@ -33,6 +51,32 @@ class CRESTConfig:
             raise ValueError("head_dim must be even for RoPE")
         if self.memory_slots <= 0 or self.max_seq_len <= 0:
             raise ValueError("memory_slots and max_seq_len must be positive")
+        if self.head_type not in ("full", "adaptive"):
+            raise ValueError(f"head_type must be 'full' or 'adaptive', got {self.head_type!r}")
+        if self.head_type == "adaptive":
+            cutoffs = list(self.adaptive_cutoffs)
+            if not cutoffs:
+                raise ValueError("adaptive head requires non-empty adaptive_cutoffs")
+            if any(int(c) != c or c <= 0 for c in cutoffs):
+                raise ValueError("adaptive_cutoffs must be positive integers")
+            if sorted(set(cutoffs)) != cutoffs:
+                raise ValueError("adaptive_cutoffs must be strictly increasing")
+            if cutoffs[-1] >= self.vocab_size:
+                raise ValueError("adaptive_cutoffs must all be < vocab_size")
+            if self.tie_embeddings:
+                raise ValueError(
+                    "head_type='adaptive' is incompatible with tie_embeddings=True: "
+                    "the adaptive head has no full V x d weight matrix to tie. "
+                    "Set tie_embeddings: false."
+                )
+            if self.adaptive_div_value <= 0:
+                raise ValueError("adaptive_div_value must be > 0")
+            if self.adaptive_cluster_probs is not None:
+                probs = list(self.adaptive_cluster_probs)
+                if len(probs) != len(cutoffs):
+                    raise ValueError("adaptive_cluster_probs must have one entry per tail cluster (len == len(adaptive_cutoffs))")
+                if any(p < 0.0 or p > 1.0 for p in probs) or sum(probs) > 1.0:
+                    raise ValueError("adaptive_cluster_probs must lie in [0,1] and sum to <= 1")
 
     @property
     def head_dim(self) -> int:

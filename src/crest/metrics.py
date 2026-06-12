@@ -33,6 +33,38 @@ def component_parameter_counts(model: CRESTModel) -> dict[str, int]:
     return groups
 
 
+def estimate_lm_head_flops(cfg: CRESTConfig, tokens: int) -> int:
+    """Forward FLOPs of the output head for `tokens` supervised positions.
+
+    full head:  2 * tokens * d * V exactly (one dense matmul row per token).
+
+    adaptive head (Grave et al., arXiv:1609.04309), expectation per token:
+        2d(k_h + n_clusters) + sum_i p_i * (2 d d_i + 2 d_i |V_i|)
+    where k_h = cutoffs[0], d_i = floor(d / div_value^(i+1)), |V_i| is the
+    cluster size, and p_i is the probability the target falls in tail cluster
+    i. p_i comes from cfg.adaptive_cluster_probs (measured by
+    crest.cli_vocab_freq); without measurements we use the conservative
+    fallback p_i = |V_i| / V... which UNDERSTATES the savings on Zipfian data
+    but never overstates them, keeping the startup report honest.
+    """
+    d = cfg.d_model
+    if cfg.head_type != "adaptive":
+        return 2 * tokens * d * cfg.vocab_size
+    cutoffs = [int(c) for c in cfg.adaptive_cutoffs]
+    edges = cutoffs + [cfg.vocab_size]
+    n_clusters = len(edges) - 1
+    per_token = 2.0 * d * (cutoffs[0] + n_clusters)
+    if cfg.adaptive_cluster_probs is not None:
+        probs = [float(p) for p in cfg.adaptive_cluster_probs]
+    else:
+        probs = [(edges[i + 1] - edges[i]) / cfg.vocab_size for i in range(n_clusters)]
+    for i in range(n_clusters):
+        cluster_size = edges[i + 1] - edges[i]
+        d_i = max(1, int(d / (cfg.adaptive_div_value ** (i + 1))))
+        per_token += probs[i] * (2.0 * d * d_i + 2.0 * d_i * cluster_size)
+    return int(per_token * tokens)
+
+
 def estimate_step_flops(cfg: CRESTConfig) -> dict[str, int]:
     """Estimate forward FLOPs for one episode step across all CREST layers.
 
@@ -75,8 +107,10 @@ def estimate_step_flops(cfg: CRESTConfig) -> dict[str, int]:
     fuse = cfg.n_layers * per_layer_fuse
     gate = cfg.n_layers * per_layer_gate
     ffn = cfg.n_layers * per_layer_ffn
-    # LM head is applied once per step on L tokens producing V logits.
-    logits = 2 * l * d * cfg.vocab_size
+    # LM head is applied once per step on L tokens. For the adaptive head this
+    # is the EXPECTED cost under the configured/measured cluster probabilities;
+    # see estimate_lm_head_flops for the formula and its conservative fallback.
+    logits = estimate_lm_head_flops(cfg, l)
     total = local + state_read + state_write + fuse + gate + ffn + logits
     return {
         "local_attention": local,

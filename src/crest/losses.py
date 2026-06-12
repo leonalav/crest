@@ -52,6 +52,43 @@ def chunked_lm_head_loss(
     return loss_sum / valid_hidden.size(0)
 
 
+def adaptive_lm_head_loss(
+    hidden: torch.Tensor,
+    labels: torch.Tensor,
+    adaptive_head: torch.nn.Module,
+    *,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    """Exact cluster-factored cross-entropy via nn.AdaptiveLogSoftmaxWithLoss.
+
+    Citation: Grave et al., arXiv:1609.04309. The factorization
+        p(y|h) = p_head(y|h)                        for y in the head cluster
+        p(y|h) = p_head(c_i|h) * p_tail_i(y|P_i h)  for y in tail cluster i
+    is exactly normalized: sum_y p(y|h) = sum_head p_head + sum_i p_head(c_i)*1 = 1.
+    The returned value is therefore a true mean NLL, directly comparable with
+    full-softmax eval losses.
+
+    PyTorch's module has NO ignore_index handling — its loss is the plain mean
+    of -output over every row passed in — so invalid (-100) positions must be
+    filtered out HERE, mirroring chunked_lm_head_loss. Labels must already be
+    in frequency-rank space (CRESTModel._map_labels does this).
+    """
+    flat_hidden = hidden.reshape(-1, hidden.size(-1))
+    flat_labels = labels.reshape(-1)
+    valid = flat_labels != ignore_index
+    if not torch.any(valid):
+        # Empty supervised set: the mathematically correct contribution is the
+        # empty sum (zero), kept on-graph for autograd/DDP parity. Touch the
+        # head parameters so DDP does not flag them as unused on this rank.
+        # Guard the degenerate 0-row case: mean over an empty batch is NaN,
+        # and NaN * 0.0 = NaN would poison the loss.
+        if flat_hidden.size(0) == 0:
+            return flat_hidden.sum() * 0.0
+        dummy = adaptive_head(flat_hidden[:1], flat_labels[:1].clamp_min(0)).loss
+        return dummy * 0.0
+    return adaptive_head(flat_hidden[valid], flat_labels[valid]).loss
+
+
 def gate_target_loss(aux: "CRESTAux", weight: float = 0.0, target: float = 0.5) -> torch.Tensor:
     if weight == 0.0:
         return aux.gate_mean.new_zeros(())

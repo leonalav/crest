@@ -131,7 +131,16 @@ def run_training(
         mode = None if train_cfg.compile_mode == "default" else train_cfg.compile_mode
         model = torch.compile(model, mode=mode, dynamic=True)
     if distributed.enabled:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[distributed.local_rank] if device.type == "cuda" else None)
+        # Adaptive softmax only evaluates a tail cluster when at least one
+        # target in the batch lands there (Grave et al., arXiv:1609.04309), so
+        # tail-cluster parameters legitimately receive no gradient on some
+        # iterations. Default DDP treats that as an error; enable unused-param
+        # detection for the adaptive head only (it costs an extra graph walk).
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[distributed.local_rank] if device.type == "cuda" else None,
+            find_unused_parameters=(model_cfg.head_type == "adaptive"),
+        )
     aux_head = StateReconstructionHead(model_cfg.d_model, train_cfg.aux_state_dim).to(device) if train_cfg.aux_state_weight > 0 else None
     if aux_head is not None:
         crest_model.aux_state_head = aux_head
@@ -175,16 +184,24 @@ def run_training(
         # dominates compute. Each optimizer step fires
         #   ceil(batch_size / micro_batch_size) × ceil(episode_steps / tbptt_k) × tbptt_k
         # forward passes. At micro_batch_size ≤ 4 on CUDA this is typically
-        # 3–8% peak TFLOPS. Raise micro_batch_size (check logit memory:
-        #   micro_batch_size × step_length × vocab_size × 2 bytes) to recover utilization.
+        # 3–8% peak TFLOPS. Raise micro_batch_size (check logit memory below)
+        # to recover utilization. The adaptive head only materializes
+        # head-cluster logits (cutoffs[0] + n_clusters columns, fp32), not the
+        # full vocab, so its per-call activation memory is ~V/k_h times smaller.
         if device.type == "cuda" and micro_bs <= 4:
+            if model_cfg.head_type == "adaptive":
+                head_cols = int(model_cfg.adaptive_cutoffs[0]) + len(model_cfg.adaptive_cutoffs)
+                bytes_per = 4  # adaptive head runs in fp32 under autocast
+            else:
+                head_cols = model_cfg.vocab_size
+                bytes_per = 2
             print(
                 f"[WARNING] micro_batch_size={micro_bs} is very small on CUDA "
                 f"({fwd_calls_per_step} forward calls/step). GPU utilization will be dominated "
                 f"by kernel-launch overhead (~3-8% peak TFLOPS). "
                 f"Consider raising micro_batch_size to 16 or 32 if VRAM allows "
-                f"(logit mem ≈ {micro_bs * data_cfg.step_length * model_cfg.vocab_size * 2 / 1e6:.0f} MB → "
-                f"{32 * data_cfg.step_length * model_cfg.vocab_size * 2 / 1e6:.0f} MB at micro_batch_size=32).",
+                f"(logit mem ≈ {micro_bs * data_cfg.step_length * head_cols * bytes_per / 1e6:.0f} MB → "
+                f"{32 * data_cfg.step_length * head_cols * bytes_per / 1e6:.0f} MB at micro_batch_size=32).",
                 flush=True,
             )
 

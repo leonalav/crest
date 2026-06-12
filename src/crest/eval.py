@@ -5,7 +5,6 @@ import math
 import torch
 from torch.utils.data import DataLoader
 
-from .losses import lm_loss
 from .model import CRESTModel
 
 
@@ -53,26 +52,27 @@ def evaluate(model: CRESTModel, loader: DataLoader, device: torch.device | str =
                 mb_steps = step_idx[mb_start:mb_end]
                 state = model.init_state(mb_inputs.size(0), device=device, dtype=next(model.parameters()).dtype)
                 for t in range(mb_inputs.size(1)):
-                    logits, state, aux = model(mb_inputs[:, t], state=state, step_idx=mb_steps[:, t])
-                    valid = mb_labels[:, t] != -100
+                    # return_logits=False avoids materializing the [B, L, V]
+                    # tensor; head_eval computes exact per-target log-probs and
+                    # argmax predictions through the configured head.
+                    _, state, aux = model(mb_inputs[:, t], state=state, step_idx=mb_steps[:, t], return_logits=False)
+                    step_labels = mb_labels[:, t]
+                    valid = step_labels != -100
                     num_valid = int(valid.sum().item())
-                    # Token-weighted loss: lm_loss returns the mean over valid
-                    # labels (or 0 when no valid label exists). To compute a
-                    # corpus-level mean, accumulate sum_of_token_losses by
-                    # multiplying each step's mean by its valid-token count,
-                    # then divide by total valid tokens. Steps with zero
-                    # supervised tokens contribute nothing to either sum.
+                    token_lp, pred = model.head_eval(aux.hidden, step_labels)
+                    # Token-weighted loss: -log p summed over valid positions,
+                    # divided at the end by the total valid-token count, gives
+                    # the exact corpus-level mean NLL. token_lp is exactly 0 at
+                    # ignored positions, so the masked sum is just the sum.
                     if num_valid > 0:
-                        loss = lm_loss(logits, mb_labels[:, t])
-                        total_loss_weighted += float(loss.item()) * num_valid
+                        total_loss_weighted += float((-token_lp[valid]).sum().item())
                         total_valid_tokens += num_valid
                     total_step_records += 1
                     gate_sum += float(aux.gate_mean.item())
                     read_entropy_sum += float(aux.state_read_entropy.item())
                     write_entropy_sum += float(aux.write_entropy.item())
-                    pred = logits.argmax(dim=-1)
                     if num_valid > 0:
-                        hits = pred[valid] == mb_labels[:, t][valid]
+                        hits = pred[valid] == step_labels[valid]
                         correct += int(hits.sum().item())
                         total += num_valid
                         progress = t / max(1, mb_inputs.size(1) - 1)
@@ -86,15 +86,13 @@ def evaluate(model: CRESTModel, loader: DataLoader, device: torch.device | str =
                             late_correct += int(hits.sum().item())
                             late_total += num_valid
                     if t < mb_inputs.size(1) - 1:
-                        boundary_labels = mb_labels[:, t, -1]
+                        boundary_labels = step_labels[:, -1]
                         boundary_valid_mask = boundary_labels != -100
                         b_valid = int(boundary_valid_mask.sum().item())
                         if b_valid > 0:
-                            boundary_logits = logits[:, -1]
-                            boundary_loss = lm_loss(boundary_logits.unsqueeze(1), boundary_labels.unsqueeze(1))
-                            boundary_loss_weighted += float(boundary_loss.item()) * b_valid
+                            boundary_loss_weighted += float((-token_lp[:, -1][boundary_valid_mask]).sum().item())
                             boundary_valid_tokens += b_valid
-                            boundary_correct += int((boundary_logits.argmax(dim=-1)[boundary_valid_mask] == boundary_labels[boundary_valid_mask]).sum().item())
+                            boundary_correct += int((pred[:, -1][boundary_valid_mask] == boundary_labels[boundary_valid_mask]).sum().item())
                             boundary_total += b_valid
     finally:
         if hasattr(model, "set_diagnostics_enabled"):

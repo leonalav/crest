@@ -1,0 +1,37 @@
+name: default_adaptive
+# Llama 3 tokenizer (vocab untouched) + adaptive softmax head
+# (Grave et al., arXiv:1609.04309 — exact cluster-factored softmax).
+#
+# REQUIRED BEFORE FIRST RUN (Phase 1):
+#   PYTHONPATH=src python -m crest.cli_vocab_freq \
+#     --data data/episodic_arrow/default \
+#     --vocab-size 128256 \
+#     --out data/episodic_arrow/default/token_freq.pt \
+#     --d-model 256
+# Then replace adaptive_cutoffs / adaptive_cluster_probs below with the
+# script's suggested values (accept cutoffs only if head coverage >= 0.90).
+vocab_size: 128256
+max_seq_len: 128
+max_steps: 2000
+n_layers: 4
+d_model: 256
+n_heads: 8
+d_ffn: 768
+memory_slots: 16
+dropout: 0.0
+rope_base: 10000.0
+rms_norm_eps: 1.0e-6
+gate_retention_bias: -2.0
+# Adaptive head cannot tie to the V x d input embedding (it has no such matrix).
+tie_embeddings: false
+head_type: adaptive
+# PLACEHOLDERS pending Phase-1 measurement: head=16384 ranks, one mid tail,
+# remainder in the far tail. div_value=4 -> tail dims 64 and 16 at d_model=256.
+adaptive_cutoffs: [16384, 49152]
+adaptive_div_value: 4.0
+adaptive_head_bias: false
+# Measured tail-target probabilities from cli_vocab_freq (FLOP report only;
+# null = conservative uniform fallback that understates savings).
+adaptive_cluster_probs: null
+# Output of cli_vocab_freq: bijective original-id -> frequency-rank map.
+token_perm_path: data/episodic_arrow/default/token_freq.pt

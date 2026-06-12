@@ -592,6 +592,54 @@ Run order:
 5. Only scale after CREST beats no_state on real text.
 ```
 
+## 13.5 Adaptive Softmax Head (Llama 3 vocab, tokenizer unchanged)
+
+The 128k-vocab output head dominates compute at small `d_model` (~85% of
+forward FLOPs at d=256). The adaptive softmax head (Grave et al.,
+arXiv:1609.04309) replaces the dense `Linear(d, V)` with an exactly
+normalized cluster factorization. The tokenizer is never modified; the model
+applies an internal bijective token relabeling (frequency permutation).
+
+Step 1 — frequency audit (run once per prepared dataset):
+
+```bash
+PYTHONPATH=src python -m crest.cli_vocab_freq \
+  --data data/episodic_arrow/default \
+  --vocab-size 128256 \
+  --out data/episodic_arrow/default/token_freq.pt \
+  --d-model 256
+```
+
+This prints a coverage table, suggests `adaptive_cutoffs`, and writes the
+permutation payload. Accept the cutoffs only if head coverage >= 0.90.
+
+Step 2 — train with the adaptive model config:
+
+```bash
+PYTHONPATH=src python -m crest.cli_train_variant \
+  --model src/configs/models/default_adaptive.yaml \
+  --data src/configs/data_manifests/default.yaml \
+  --training src/configs/training/default.yaml \
+  --variant M16
+```
+
+Before the run, paste the script's suggested `adaptive_cutoffs` and
+`adaptive_cluster_probs` into `default_adaptive.yaml`.
+
+Rules:
+
+```text
+Adaptive head requires tie_embeddings: false.
+Adaptive checkpoints cannot resume full-head checkpoints (and vice versa).
+A run must keep the same token_freq.pt for its whole lifetime.
+eval_loss stays exactly comparable to full-head runs (exact normalization).
+The head runs in fp32 under autocast; logit memory drops ~15x, so raise
+micro_batch_size until VRAM-bound.
+```
+
+Validation gate (matched-step A/B vs `default.yaml`): accept if
+`eval_loss` delta <= 0.03 nats at >= 3.5x tokens/sec.
+
 ## 14. Troubleshooting
 
 ### DDP Unused Parameter Error
